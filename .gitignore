@@ -1,3 +1,14 @@
 **/target/
-**/testdll/
 **/.cargo/
+**/testdll/
+**/release/
+*.zip
+.idea/
+*.iml
+.vscode/
+.vs/
+*.suo
+*.user
+Thumbs.db
+Desktop.ini
+.DS_Store

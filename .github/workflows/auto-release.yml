@@ -1,0 +1,88 @@
+name: Auto Release
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish Release
+    runs-on: windows-latest
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[RELEASE]')
+    env:
+      COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          cache-on-failure: "true"
+
+      - name: Extract version
+        id: version
+        shell: pwsh
+        run: |
+          $msg = if ($env:COMMIT_MESSAGE) { $env:COMMIT_MESSAGE } else { "" }
+          $m = [regex]::Match($msg, '\[RELEASE\]\s*(?:v)?(\d+\.\d+\.\d+)')
+          if ($m.Success) {
+            $ver = $m.Groups[1].Value
+            Write-Host "Version from commit message: $ver"
+          } else {
+            $cargo = Get-Content Cargo.toml -Raw
+            $vm = [regex]::Match($cargo, 'version\s*=\s*"(\d+\.\d+\.\d+)"')
+            if (-not $vm.Success) { throw "Cannot find version in Cargo.toml" }
+            $ver = $vm.Groups[1].Value
+            Write-Host "Version from Cargo.toml: $ver"
+          }
+          Add-Content $env:GITHUB_OUTPUT "version=$ver"
+          # 提取更新说明（提交信息第一行之后的正文），写入文件供 body_path 使用
+          $body = ($msg -split "`n", 2)[1]
+          if ($body) { $body = $body.Trim() }
+          Set-Content -Path RELEASE_BODY.md -Value $body -Encoding UTF8
+
+      - name: Build FlashDllInjector.exe
+        run: cargo build --release
+
+      - name: Build fdi/core.dll
+        working-directory: fdi
+        run: cargo build --release
+
+      - name: Assemble release folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release\fdi | Out-Null
+          Copy-Item target\release\FlashDllInjector.exe release\ -Force
+          if (Test-Path icon.ico) { Copy-Item icon.ico release\ -Force }
+          Copy-Item fdi\target\release\core.dll release\fdi\ -Force
+          Write-Host "=== release contents ==="
+          Get-ChildItem -Recurse release | Select-Object FullName, Length
+
+      - name: Compress to release.zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path release\* -DestinationPath release.zip -Force
+          Write-Host "=== release.zip ==="
+          Get-Item release.zip | Select-Object FullName, Length
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          body_path: RELEASE_BODY.md
+          files: release.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true

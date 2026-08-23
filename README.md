@@ -1,4 +1,4 @@
-# FlashDllInjector
+# FlashDllInjector：下一代 Minecraft Dll 注入器
 
 一个面向 **Windows + Minecraft（Java 版）** 的高性能 **DLL 注入工具**，采用命令行交互菜单。
 

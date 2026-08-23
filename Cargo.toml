@@ -1,6 +1,6 @@
 [package]
 name = "FlashDllInjector"
-version = "2.3.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["FastNow Studio <contact@fastnow.studio>"]
 license = "Apache-2.0"
