@@ -67,32 +67,48 @@ Output folder: D:\...\FlashDllInjector\release
 
 ### 它是干什么的？
 当你把代码推送到 GitHub，且**最新一条提交信息包含 `[RELEASE]`** 时，云端会自动：
-1. 在 Windows 虚拟机上编译 `FlashDllInjector.exe` 和 `fdi/core.dll`
-2. 打包成 **`release.zip`**
-3. 自动创建一个 **GitHub Release**（版本号作 tag，附件是 `release.zip`，并生成更新说明）
+1. 读取根目录 **`version.json`** 里的发布信息（`title` / `version` / `description` / `release`）
+2. 在 Windows 虚拟机上编译 `FlashDllInjector.exe` 和 `fdi/core.dll`
+3. 打包成 **`release.zip`**
+4. 用 `version.json` 的信息创建 **GitHub Release**（附件是 `release.zip`）
 
-**你完全不用在自己电脑装 Rust**，只要 push 就行。
+**你完全不用在自己电脑装 Rust**，只要改好 `version.json` 并 push 就行。
 
-### 触发方式
+### 📄 先认识 `version.json`（发布信息的唯一来源）
 
-**方式 A：提交信息里直接写版本**（推荐，版本以提交信息为准）
-```bash
-git commit -m "[RELEASE] v1.2.3" -m "- 修复了进程筛选问题
-- 新增 XXX 功能"
-git push
+发布时的**版本号、标题、说明、是否发布**全部由根目录的 `version.json` 控制。结构如下：
+
+```json
+{
+  "title": "FlashDllInjector v2.3.0",
+  "version": "2.3.0",
+  "description": "本版本主要更新：\n- 修复进程筛选问题\n- 新增功能",
+  "release": true
+}
 ```
-- tag / Release 标题 = `v1.2.3`
-- Release 的更新说明 = 提交信息第一行之后的内容
 
-**方式 B：只写 `[RELEASE]`，版本读 `Cargo.toml`**
+字段说明：
+
+| 字段 | 是否必填 | 作用 |
+|------|:---:|------|
+| `title` | 可选 | Release 标题；缺省时自动用 `v<version>` |
+| `version` | **必填** | Release 的 tag / 版本号（会生成 tag `v2.3.0`）；缺省会直接报错 |
+| `description` | 可选 | Release 更新说明正文（支持 `\n` 换行） |
+| `release` | 可选 | **布尔开关**：`true` 才真正创建 Release，`false`/缺省则只编译打包、不发布 |
+
+### 触发与使用
+
+**步骤 1：更新 `version.json`**
+把 `version`、`title`、`description` 改成新版本的内容，并确认 `release` 为 `true`。
+
+**步骤 2：提交信息带 `[RELEASE]` 并推送**
 ```bash
+git add version.json
 git commit -m "[RELEASE]"
 git push
 ```
-- 版本号自动取自 `Cargo.toml` 的 `version` 字段
-- 记得先手动把 `Cargo.toml` 里的版本号改成新的
 
-**方式 C：手动触发（用于测试）**
+**步骤 3（可选）：手动触发测试**
 - 打开 GitHub 仓库 → `Actions` → `Auto Release` → 右侧 **Run workflow** → 运行。
 
 ### 产物结构（`release.zip` 内）
@@ -108,12 +124,12 @@ release.zip
 1. `Checkout` — 拉取代码
 2. `Set up Rust` — 装 Rust 稳定版工具链
 3. `Rust cache` — 缓存编译产物，加速后续构建
-4. `Extract version` — 提取版本号 + 写更新说明到 `RELEASE_BODY.md`
+4. `Read version.json metadata` — 读取 `title`/`version`/`description`/`release`，把说明写入 `RELEASE_BODY.md`
 5. `Build FlashDllInjector.exe` — 编译主程序
 6. `Build fdi/core.dll` — 编译覆盖层
 7. `Assemble release folder` — 组装 `release/` 目录
 8. `Compress to release.zip` — 用 `Compress-Archive` 压缩
-9. `Create GitHub Release` — 发布 Release 并上传 `release.zip`
+9. `Create GitHub Release` — **仅当 `release=true`** 时创建 Release 并上传 `release.zip`（标题、tag、说明都来自 `version.json`）
 
 ### 首次使用前要做的配置
 1. **把代码推到 GitHub**：本项目还没配置远程仓库，先关联：
@@ -129,8 +145,10 @@ release.zip
 | 现象 | 原因 | 解决 |
 |------|------|------|
 | 提交了 `[RELEASE]` 但没触发 | 不是最新一条提交，或分支不在 `main`/`master` | 让含 `[RELEASE]` 的提交成为本次 push 的最新一条；确认分支名 |
+| 工作流报 `version.json is missing required field: version` | `version.json` 里没有 `version` 字段 | 补上 `"version": "x.y.z"` |
+| 编译打包了但没发布 Release | `version.json` 的 `release` 不是 `true` | 把 `release` 改成 `true` 再 push |
 | 创建 Release 失败 / tag 重复 | 版本号已被用过 | 换一个新版本号 |
-| Release 里没有更新说明 | 提交信息只有一行、没有正文 | 用 `git commit -m "[RELEASE] v1.2.3" -m "正文..."` 加第二段；或 `generate_release_notes` 已自动补全 |
+| Release 标题/说明不对 | `version.json` 没改 | 先更新 `title` / `description` 再触发 |
 | 构建失败 | 代码编译报错 | 查看工作流日志里的 `Build` 步骤输出 |
 
 ---

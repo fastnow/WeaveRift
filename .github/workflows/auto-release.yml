@@ -13,8 +13,6 @@ jobs:
     name: Build & Publish Release
     runs-on: windows-latest
     if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[RELEASE]')
-    env:
-      COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
 
     steps:
       - name: Checkout
@@ -31,27 +29,37 @@ jobs:
           workspaces: . -> target
           cache-on-failure: "true"
 
-      - name: Extract version
-        id: version
+      - name: Read version.json metadata
+        id: meta
         shell: pwsh
         run: |
-          $msg = if ($env:COMMIT_MESSAGE) { $env:COMMIT_MESSAGE } else { "" }
-          $m = [regex]::Match($msg, '\[RELEASE\]\s*(?:v)?(\d+\.\d+\.\d+)')
-          if ($m.Success) {
-            $ver = $m.Groups[1].Value
-            Write-Host "Version from commit message: $ver"
-          } else {
-            $cargo = Get-Content Cargo.toml -Raw
-            $vm = [regex]::Match($cargo, 'version\s*=\s*"(\d+\.\d+\.\d+)"')
-            if (-not $vm.Success) { throw "Cannot find version in Cargo.toml" }
-            $ver = $vm.Groups[1].Value
-            Write-Host "Version from Cargo.toml: $ver"
-          }
+          if (-not (Test-Path version.json)) { throw "version.json not found at repo root" }
+
+          $json = Get-Content version.json -Raw | ConvertFrom-Json
+
+          $ver = [string]$json.version
+          if (-not $ver) { throw "version.json is missing required field: version" }
           Add-Content $env:GITHUB_OUTPUT "version=$ver"
-          # 提取更新说明（提交信息第一行之后的正文），写入文件供 body_path 使用
-          $body = ($msg -split "`n", 2)[1]
-          if ($body) { $body = $body.Trim() }
-          Set-Content -Path RELEASE_BODY.md -Value $body -Encoding UTF8
+
+          $title = [string]$json.title
+          if (-not $title) { $title = "v$ver" }
+          Add-Content $env:GITHUB_OUTPUT "title=$title"
+
+          $desc = [string]$json.description
+          Set-Content -Path RELEASE_BODY.md -Value $desc -Encoding UTF8
+
+          $rel = [string]$json.release
+          if ($rel -match '^(true|1|yes)$') {
+            Add-Content $env:GITHUB_OUTPUT "release=true"
+          } else {
+            Add-Content $env:GITHUB_OUTPUT "release=false"
+          }
+
+          Write-Host "version  = $ver"
+          Write-Host "title    = $title"
+          Write-Host "release  = $rel"
+          Write-Host "--- description ---"
+          Write-Host $desc
 
       - name: Build FlashDllInjector.exe
         run: cargo build --release
@@ -78,10 +86,11 @@ jobs:
           Get-Item release.zip | Select-Object FullName, Length
 
       - name: Create GitHub Release
+        if: steps.meta.outputs.release == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: v${{ steps.version.outputs.version }}
+          tag_name: v${{ steps.meta.outputs.version }}
+          name: ${{ steps.meta.outputs.title }}
           body_path: RELEASE_BODY.md
           files: release.zip
           generate_release_notes: true

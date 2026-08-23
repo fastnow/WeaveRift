@@ -1,0 +1,6 @@
+{
+  "title": "FlashDllInjector v2.3.0",
+  "version": "2.3.0",
+  "description": "本版本主要更新：\n- 修复进程筛选问题，排除浏览器等无关进程\n- 新增基于 version.json 的自动发布工作流",
+  "release": true
+}
