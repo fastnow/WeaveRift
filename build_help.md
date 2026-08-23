@@ -41,7 +41,7 @@ package.bat
 ================================================
    Build Complete!
 ================================================
-Output folder: D:\...\FlashDllInjector\release
+Output folder: ...\FlashDllInjector\release
 ```
 
 ### 运行过程失败怎么办？
@@ -162,7 +162,3 @@ release.zip
 | 想在自己电脑上调试编译报错 | 手动 `cargo build --release` |
 
 > 提示：本地调试编译用 `cargo build`（debug 快）；出正式包用 `cargo build --release` 或 `package.bat`（更小更快，已配置 `lto`、`strip`、`opt-level=z`）。
-
----
-
-*README 里的功能/注意事项请参考根目录的 `README.md`。*
