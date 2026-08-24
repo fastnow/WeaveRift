@@ -4,7 +4,7 @@ use std::os::windows::ffi::OsStrExt;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
-use windows::core::PCWSTR;
+use windows::core::{PCSTR, PCWSTR};
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -91,6 +91,7 @@ const IMAGE_DOS_SIGNATURE: u16 = 0x5A4D;
 const IMAGE_NT_SIGNATURE: u32 = 0x00004550;
 const IMAGE_REL_BASED_DIR64: u16 = 10;
 const IMAGE_REL_BASED_HIGHLOW: u16 = 3;
+const IMAGE_ORDINAL_FLAG64: u64 = 0x8000000000000000;
 
 pub struct PeParser {
     pub data: Vec<u8>,
@@ -116,6 +117,10 @@ impl PeParser {
         })?;
         if nt.Signature != IMAGE_NT_SIGNATURE {
             return Err(anyhow!("Invalid NT signature"));
+        }
+        // 32位检测
+        if nt.OptionalHeader.Magic == 0x10b {
+            return Err(anyhow!("32-bit PE detected — not supported in this version"));
         }
         let num = nt.FileHeader.NumberOfSections as usize;
         let mut sections = Vec::with_capacity(num);
@@ -309,9 +314,10 @@ impl PeParser {
                 let tv = u64::from_le_bytes(self.data[tptr..tptr+8].try_into().unwrap());
                 if tv == 0 { break; }
 
-                let func_addr = if (tv & 0x8000000000000000) != 0 {
+                let func_addr = if (tv & IMAGE_ORDINAL_FLAG64) != 0 {
                     let ord = (tv & 0xFFFF) as u16;
-                    unsafe { GetProcAddress(hmod, windows::core::PCSTR(ord as usize as *const u8)) }
+                    // 正确方式：GetProcAddress 会检查高16位为0时按ordinal处理
+                    unsafe { GetProcAddress(hmod, PCSTR(ord as usize as *const u8)) }
                         .map(|a| a as u64).unwrap_or(0)
                 } else {
                     let nrva = tv as u32;
@@ -321,7 +327,7 @@ impl PeParser {
                     while nend < self.data.len() && self.data[nend] != 0 { nend += 1; }
                     let fname = std::str::from_utf8(&self.data[nptr+2..nend])
                         .map_err(|_| "Invalid function name")?;
-                    unsafe { GetProcAddress(hmod, windows::core::PCSTR(fname.as_ptr())) }
+                    unsafe { GetProcAddress(hmod, PCSTR(fname.as_ptr())) }
                         .map(|a| a as u64).unwrap_or(0)
                 };
 

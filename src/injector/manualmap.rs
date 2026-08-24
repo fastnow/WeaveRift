@@ -7,7 +7,8 @@ use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
 use windows::Win32::System::Memory::{
     VirtualAllocEx, VirtualFreeEx, VirtualProtectEx,
     MEM_COMMIT, MEM_RELEASE, MEM_RESERVE,
-    PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS,
+    PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
+    PAGE_NOACCESS, PAGE_PROTECTION_FLAGS, PAGE_READONLY, PAGE_READWRITE,
 };
 use windows::Win32::System::Threading::{
     CreateRemoteThread, GetExitCodeThread, OpenProcess, TerminateThread, WaitForSingleObject,
@@ -15,6 +16,7 @@ use windows::Win32::System::Threading::{
 };
 
 fn build_dllmain_stub(remote_base: usize, entry: usize) -> Vec<u8> {
+    // x64: mov rcx, remote_base; mov edx, 1; xor r8d, r8d; mov rax, entry; call rax; xor rax, rax; ret
     let mut c = Vec::with_capacity(32);
     c.push(0x48); c.push(0xB9);
     c.extend_from_slice(&remote_base.to_le_bytes());
@@ -29,15 +31,19 @@ fn build_dllmain_stub(remote_base: usize, entry: usize) -> Vec<u8> {
 }
 
 fn prot_from_chars(chars: u32) -> PAGE_PROTECTION_FLAGS {
-    let e = chars & 0x20000000 != 0;
-    let r = chars & 0x40000000 != 0;
-    let w = chars & 0x80000000 != 0;
-    match (e, r, w) {
-        (true, true, true) => PAGE_EXECUTE_READWRITE,
-        (true, true, false) => PAGE_EXECUTE_READWRITE,
-        (true, false, false) => PAGE_EXECUTE_READWRITE,
-        (false, true, true) => PAGE_EXECUTE_READWRITE,
-        _ => PAGE_EXECUTE_READWRITE,
+    let executable = chars & 0x20000000 != 0;
+    let readable   = chars & 0x40000000 != 0;
+    let writable   = chars & 0x80000000 != 0;
+
+    match (executable, readable, writable) {
+        (true,  true,  true)  => PAGE_EXECUTE_READWRITE,
+        (true,  true,  false) => PAGE_EXECUTE_READ,
+        (true,  false, true)  => PAGE_EXECUTE_READWRITE,
+        (true,  false, false) => PAGE_EXECUTE,
+        (false, true,  true)  => PAGE_READWRITE,
+        (false, true,  false) => PAGE_READONLY,
+        (false, false, true)  => PAGE_READWRITE,
+        (false, false, false) => PAGE_NOACCESS,
     }
 }
 
@@ -89,11 +95,11 @@ pub fn inject(pid: u32, dll_path: &Path) -> Result<InjectResult, String> {
     pe.apply_relocations_remote(handle, base, delta)
         .map_err(|e| format!("Relocations: {}", e))?;
 
-    // Fill imports (system DLLs only assumption)
+    // Fill imports
     pe.fill_imports_remote(handle, base)
         .map_err(|e| format!("Imports: {}", e))?;
 
-    // Set section protections
+    // Set correct section protections (FIXED!)
     for sec in pe.sections() {
         let addr = (base as usize + sec.VirtualAddress as usize) as *mut std::ffi::c_void;
         let prot = prot_from_chars(sec.Characteristics);

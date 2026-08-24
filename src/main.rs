@@ -65,10 +65,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     pid = Some(procs[0].pid);
                     println!("✅ Auto-selected PID {} ({})", procs[0].pid, procs[0].name);
                 } else {
-                    let items: Vec<String> = procs.iter().map(|p| format!("PID: {:6}  {}  ({})", p.pid, p.name, p.title)).collect();
-                    let sel = Select::new("Select process:", items).prompt()?;
-                    let p = sel.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                    if p != 0 { pid = Some(p); println!("✅ Selected PID {}", p); }
+                    let items: Vec<String> = procs.iter()
+                        .map(|p| format!("PID: {:6}  {}  ({})", p.pid, p.name, p.title))
+                        .collect();
+                    let sel = Select::new("Select process:", items.clone()).prompt()?;
+                    if let Some(idx) = items.iter().position(|s| s == &sel) {
+                        pid = Some(procs[idx].pid);
+                        println!("✅ Selected PID {} - {}", procs[idx].pid, procs[idx].name);
+                    }
                 }
             }
             "💉 Select Inject Method" => {
@@ -98,8 +102,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "🗑  Remove DLL" => {
                 if dlls.is_empty() { println!("❌ Empty."); continue; }
                 let items: Vec<String> = dlls.iter().map(|p| p.display().to_string()).collect();
-                let sel = Select::new("Remove:", items).prompt()?;
-                if let Some(i) = dlls.iter().position(|p| p.display().to_string() == sel) {
+                let sel = Select::new("Remove:", items.clone()).prompt()?;
+                if let Some(i) = items.iter().position(|s| s == &sel) {
                     let r = dlls.remove(i);
                     println!("✅ Removed {}", r.display());
                 }
@@ -123,7 +127,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("\nReady to inject {} DLL(s) via [{}]", dlls.len(), method);
                 if !Confirm::new("Execute?").with_default(true).prompt()? { continue; }
 
-                // ---------- 新增：注入覆盖层 core.dll（若存在） ----------
                 let core_path = std::env::current_exe()?.parent().unwrap().join("fdi").join("core.dll");
                 if core_path.exists() {
                     println!("🎨 Injecting overlay core...");
@@ -131,7 +134,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("⚠️ Overlay injection failed: {}", e);
                     }
                 }
-                // -------------------------------------------------------
 
                 let mut failed = Vec::new();
                 let total = dlls.len();

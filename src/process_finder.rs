@@ -17,6 +17,11 @@ struct EnumState {
     seen: HashSet<u32>,
 }
 
+struct EnumPidState {
+    target: u32,
+    title: Option<String>,
+}
+
 pub fn find_minecraft_processes() -> Vec<ProcessInfo> {
     let mut state = Box::new(EnumState { found: Vec::new(), seen: HashSet::new() });
     let raw = Box::into_raw(state);
@@ -31,7 +36,9 @@ pub fn find_minecraft_processes() -> Vec<ProcessInfo> {
         if nl.contains("javaw") || nl.contains("java") {
             let pid = p.pid().as_u32();
             if !state.seen.contains(&pid) {
-                state.found.push(ProcessInfo { pid, name: p.name().to_string(), title: get_window_title_by_pid(pid) });
+                // 尝试补充窗口标题
+                let title = get_window_title_by_pid(pid).unwrap_or_default();
+                state.found.push(ProcessInfo { pid, name: p.name().to_string(), title });
                 state.seen.insert(pid);
             }
         }
@@ -51,36 +58,36 @@ unsafe extern "system" fn enum_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let mut pid = 0u32;
     GetWindowThreadProcessId(hwnd, Some(&mut pid));
     if pid == 0 || s.seen.contains(&pid) { return TRUE; }
-    // 标题匹配只是必要条件：Minecraft 标签页会让浏览器也匹配上，
-    // 因此必须确认该窗口属于真正的 Java 进程，否则（如 Chrome/Edge/Firefox 等）跳过。
     if !is_java_process(pid) { return TRUE; }
     s.found.push(ProcessInfo { pid, name: get_process_name(pid).unwrap_or_else(|| "javaw.exe".to_string()), title: ts });
     s.seen.insert(pid);
     TRUE
 }
 
-fn get_window_title_by_pid(target: u32) -> String {
-    let mut pid = target;
+/// 修复版：通过 PID 反查窗口标题
+fn get_window_title_by_pid(target: u32) -> Option<String> {
+    let mut state = EnumPidState { target, title: None };
     unsafe {
-        let _ = EnumWindows(Some(enum_pid), LPARAM(&mut pid as *mut u32 as isize));
+        EnumWindows(Some(enum_pid_callback), LPARAM(&mut state as *mut _ as isize));
     }
-    String::new()
+    state.title
 }
 
-unsafe extern "system" fn enum_pid(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let target = *(lparam.0 as *mut u32);
+unsafe extern "system" fn enum_pid_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let state = &mut *(lparam.0 as *mut EnumPidState);
     let mut pid = 0u32;
     GetWindowThreadProcessId(hwnd, Some(&mut pid));
-    if pid == target {
-        let mut b = [0u16; 256];
-        let len = GetWindowTextW(hwnd, &mut b);
-        if len > 0 { return FALSE; }
+    if pid == state.target {
+        let mut buf = [0u16; 256];
+        let len = GetWindowTextW(hwnd, &mut buf);
+        if len > 0 {
+            state.title = Some(String::from_utf16_lossy(&buf[..len as usize]));
+            return FALSE; // 找到即停
+        }
     }
     TRUE
 }
 
-/// 判断 pid 对应的进程是否为 Java 进程（Minecraft 以 javaw.exe / java.exe 运行）。
-/// 无法识别进程名时返回 false（不会误把浏览器等进程当作目标）。
 fn is_java_process(pid: u32) -> bool {
     match get_process_name(pid) {
         Some(name) => {
@@ -91,7 +98,6 @@ fn is_java_process(pid: u32) -> bool {
     }
 }
 
-/// 返回进程可执行文件 basename（如 "javaw.exe"）；无法打开/识别时返回 None。
 fn get_process_name(pid: u32) -> Option<String> {
     unsafe {
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;

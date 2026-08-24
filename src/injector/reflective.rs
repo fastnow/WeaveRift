@@ -33,6 +33,15 @@ pub fn inject(pid: u32, dll_path: &Path) -> Result<InjectResult, String> {
         return Err("VirtualAllocEx failed".into());
     }
 
+    let delta = base as isize - pe.image_base() as isize;
+    if delta != 0 {
+        crate::logger::info(&format!("[Reflective] Base mismatch, applying relocations (delta: 0x{:X})", delta));
+        if let Err(e) = pe.apply_relocations_remote(handle, base, delta) {
+            let _ = unsafe { VirtualFreeEx(handle, base, 0, MEM_RELEASE); CloseHandle(handle); };
+            return Err(format!("Relocation failed: {}", e));
+        }
+    }
+
     // Map headers
     let mut w = 0usize;
     unsafe {

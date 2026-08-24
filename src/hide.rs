@@ -1,8 +1,3 @@
-//! 用户态反检测
-
-use windows::Win32::Foundation::HMODULE;
-use std::ptr;
-
 #[repr(C)]
 struct ListEntry {
     flink: *mut ListEntry,

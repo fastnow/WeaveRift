@@ -36,7 +36,7 @@
 - 语言：**Rust**（2021 edition）
 - 目标平台：**Windows**
 - 授权协议：**Apache-2.0**
-- 当前版本：**v2.3.0**
+- 当前版本：**v1.1.0**
 
 ### 依赖库（编译时自动下载）
 `windows` · `sysinfo` · `rfd` · `inquire` · `anyhow` · `thiserror` · `chrono` · `winres`
@@ -181,6 +181,20 @@ FlashDllInjector/
 ### 小技巧
 - 注入前先确认游戏已经**完全进入主界面**（窗口标题已变为游戏名），这样进程和窗口更稳定。
 - 一次注入多个 DLL 时，若某个失败，其它成功的不受影响，日志里会分别列出成功与失败项。
+
+---
+
+## 更新日志
+
+### v1.1.0（2026-08-24）稳定性修复版
+修复了多项导致崩溃或行为错误的问题：
+
+- **ManualMap 节区保护位映射**：原来所有节区都映射成 `PAGE_EXECUTE_READWRITE`，形同虚设；现改为按 PE `Characteristics` 正确映射为 `PAGE_EXECUTE_READ` / `PAGE_READWRITE` / `PAGE_NOACCESS` 等。
+- **Reflective 重定位缺失**：原来完全不做重定位，基址不匹配时 DLL 内部绝对地址全部指向错误内存、必崩；现注入前检测 `delta`，非零时调用重定位修复逻辑。
+- **32 位 PE 误解析**：原来直接按 64 位结构体解析，遇到 32 位 DLL 会越界读内存导致崩溃或错误数据；现检查 `OptionalHeader.Magic`，发现 `0x10b`（32 位）时明确报错返回。
+- **GetProcAddress ordinal 传参错误**：按序号导入时原来把 ordinal 直接当指针传给 `PCSTR`，小序号值会被当成内存地址解引用；现改用 `GetProcAddress(hmod, PCSTR(MAKEINTRESOURCEA(ord)))` 正确方式。
+- **窗口标题获取废代码**：`get_window_title_by_pid` 原来回调不回写数据、永远返回空字符串；现重写为带状态的回调，找到目标 PID 的窗口后提取标题并立即终止枚举。
+- **进程选择 PID 解析错位**：原来用 `split_whitespace().nth(1)` 取 PID，进程名/标题含空格时会解析错位；现改用索引精确匹配，彻底杜绝字符串解析歧义。
 
 ---
 
