@@ -1,23 +1,23 @@
 use std::fs::{OpenOptions, File};
 use std::io::Write;
 use std::sync::{Mutex, OnceLock};
-use std::time::SystemTime;
+use chrono::Local;
 
 static LOG_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 
 fn get_time() -> String {
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
-    let hours = (secs / 3600) % 24;
-    let mins = (secs / 60) % 60;
-    let secs = secs % 60;
-    format!("{:02}:{:02}:{:02}", hours, mins, secs)
+    Local::now().format("%H:%M:%S").to_string()
 }
 
 pub fn init_logger() -> Result<(), std::io::Error> {
     let path = std::env::temp_dir().join("FlashDllInjector.log");
+    // 日志无轮转，为避免无限增大，超过 1MB 时截断重写
+    const MAX_BYTES: u64 = 1_048_576;
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > MAX_BYTES {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
     let file = OpenOptions::new()
         .create(true)
         .append(true)

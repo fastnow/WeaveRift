@@ -5,6 +5,8 @@ use windows::Win32::System::Threading::*;
 use windows::core::PWSTR;
 use std::collections::HashSet;
 
+const MC_TITLE_KEYWORDS: [&str; 5] = ["Minecraft", "forge", "FML", "Lunar", "Badlion"];
+
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
     pub pid: u32,
@@ -36,7 +38,6 @@ pub fn find_minecraft_processes() -> Vec<ProcessInfo> {
         if nl.contains("javaw") || nl.contains("java") {
             let pid = p.pid().as_u32();
             if !state.seen.contains(&pid) {
-                // 尝试补充窗口标题
                 let title = get_window_title_by_pid(pid).unwrap_or_default();
                 state.found.push(ProcessInfo { pid, name: p.name().to_string(), title });
                 state.seen.insert(pid);
@@ -52,7 +53,7 @@ unsafe extern "system" fn enum_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let len = GetWindowTextW(hwnd, &mut t);
     if len == 0 { return TRUE; }
     let ts = String::from_utf16_lossy(&t[..len as usize]);
-    if !ts.contains("Minecraft") && !ts.contains("forge") && !ts.contains("FML") && !ts.contains("Lunar") && !ts.contains("Badlion") {
+    if !MC_TITLE_KEYWORDS.iter().any(|kw| ts.contains(kw)) {
         return TRUE;
     }
     let mut pid = 0u32;
@@ -64,7 +65,6 @@ unsafe extern "system" fn enum_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     TRUE
 }
 
-/// 修复版：通过 PID 反查窗口标题
 fn get_window_title_by_pid(target: u32) -> Option<String> {
     let mut state = EnumPidState { target, title: None };
     unsafe {
@@ -82,7 +82,7 @@ unsafe extern "system" fn enum_pid_callback(hwnd: HWND, lparam: LPARAM) -> BOOL 
         let len = GetWindowTextW(hwnd, &mut buf);
         if len > 0 {
             state.title = Some(String::from_utf16_lossy(&buf[..len as usize]));
-            return FALSE; // 找到即停
+            return FALSE;
         }
     }
     TRUE

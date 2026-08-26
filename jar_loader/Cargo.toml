@@ -1,12 +1,13 @@
 [package]
 name = "jar_loader"
-version = "1.0.0"
+version = "1.0.2"
 edition = "2021"
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
+module_hide = { path = "../module_hide" }
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Memory",

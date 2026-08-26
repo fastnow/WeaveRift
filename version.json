@@ -1,6 +1,6 @@
 {
-  "title": "FlashDllInjector v1.1.0",
-  "version": "1.1.0",
-  "description": "本版本为稳定性修复版，修复了以下问题：\n- 修复 ManualMap 节区保护位映射，按 PE Characteristics 正确映射到 PAGE_EXECUTE_READ / PAGE_READWRITE / PAGE_NOACCESS 等\n- 修复 Reflective 注入缺失重定位的问题，基址不匹配时自动修复目标进程重定位\n- 修复 32 位 PE 误解析导致的越界读取，遇到 32 位 DLL 时明确报错\n- 修复按序号导入函数时 GetProcAddress 传参错误，改用 MAKEINTRESOURCEA\n- 重写进程窗口标题获取逻辑，正确返回目标 PID 的窗口标题\n- 修复进程选择时 PID 字符串解析错位问题，改为索引精确匹配",
+  "title": "FlashDllInjector v1.0.2",
+  "version": "1.0.2",
+  "description": "本版本为稳定性与隐蔽性增强版：\n- 新增 module_hide 模块隐藏：被注入的 DLL 会从目标进程 PEB 加载链表中摘除（对标主流注入脚本）\n- 重写 jar_loader 的 JNI 代码并修复编译问题，使其可正常构建与打包\n- 明确仅支持 64 位 DLL 与 64 位目标进程，消除 32 位路径自相矛盾\n- 修复按序号导入函数时 GetProcAddress 传参错误，改用 MAKEINTRESOURCEA 语义\n- 修复 ManualMap 节区保护位映射、Reflective 重定位缺失、32 位 PE 误解析越界读取\n- 重写进程窗口标题获取逻辑，修复进程选择时 PID 解析错位问题\n- 版本号统一由 Cargo.toml 生成，日志不再出现版本号不一致",
   "release": true
 }

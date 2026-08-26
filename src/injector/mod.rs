@@ -4,6 +4,7 @@ pub mod manualmap;
 pub mod pe_util;
 
 use std::path::Path;
+use crate::error::InjectorError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InjectMethod {
@@ -29,7 +30,7 @@ pub struct InjectResult {
     pub dll_path: String,
 }
 
-pub fn inject(pid: u32, dll_path: &Path, method: InjectMethod) -> Result<InjectResult, String> {
+pub fn inject(pid: u32, dll_path: &Path, method: InjectMethod) -> Result<InjectResult, InjectorError> {
     match method {
         InjectMethod::LoadLibrary => loadlibrary::inject(pid, dll_path),
         InjectMethod::Reflective => reflective::inject(pid, dll_path),
@@ -37,18 +38,28 @@ pub fn inject(pid: u32, dll_path: &Path, method: InjectMethod) -> Result<InjectR
     }
 }
 
-pub fn is_process_64bit(pid: u32) -> Result<bool, String> {
+pub fn is_process_64bit(pid: u32) -> Result<bool, InjectorError> {
     use windows::Win32::Foundation::{CloseHandle, BOOL};
     use windows::Win32::System::Threading::{IsWow64Process, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows::Win32::System::SystemInformation::{GetNativeSystemInfo, PROCESSOR_ARCHITECTURE_AMD64};
+
+    let mut sys_info = unsafe { std::mem::zeroed() };
+    unsafe { GetNativeSystemInfo(&mut sys_info) };
+    let system_is_64 = unsafe { sys_info.Anonymous.Anonymous.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 };
 
     let handle = unsafe {
         OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-    }.map_err(|e| format!("OpenProcess failed: {:?}", e))?;
+    }.map_err(|e| InjectorError::ProcessNotFound(format!("OpenProcess failed: {:?}", e)))?;
 
     let mut is_wow64 = BOOL(0);
     let result = unsafe { IsWow64Process(handle, &mut is_wow64) };
     let _ = unsafe { CloseHandle(handle) };
 
-    result.map_err(|e| format!("IsWow64Process failed: {:?}", e))?;
-    Ok(is_wow64.0 == 0)
+    result.map_err(|e| InjectorError::ProcessNotFound(format!("IsWow64Process failed: {:?}", e)))?;
+
+    if system_is_64 {
+        Ok(is_wow64.0 == 0)
+    } else {
+        Ok(false)
+    }
 }

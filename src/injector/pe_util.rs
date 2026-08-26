@@ -1,10 +1,21 @@
 use anyhow::{anyhow, Result};
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::os::windows::ffi::OsStrExt;
-use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows::core::{PCSTR, PCWSTR};
+use std::path::Path;
+use std::fs;
+use crate::error::InjectorError;
+
+// 引入 winapi 的 tlhelp32 和 handleapi
+use winapi::um::tlhelp32::{CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE};
+use winapi::um::libloaderapi::FreeLibrary;
+use winapi::um::handleapi::{CloseHandle as WinapiCloseHandle, INVALID_HANDLE_VALUE};
+use winapi::shared::minwindef::HMODULE as WinapiHMODULE;
+
+// ─── PE 结构体定义 ─────────────────────────────────────────────────────────────
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -93,6 +104,15 @@ const IMAGE_REL_BASED_DIR64: u16 = 10;
 const IMAGE_REL_BASED_HIGHLOW: u16 = 3;
 const IMAGE_ORDINAL_FLAG64: u64 = 0x8000000000000000;
 
+/// 等价于 C 宏 MAKEINTRESOURCEA：把导入序号(ordinal)直接当作"资源字符串指针"传给
+/// GetProcAddress。GetProcAddress 会依据"该指针高 16 位为 0"判定为按序号导入，
+/// 从而避免把小序号当普通内存地址去解引用。
+fn make_int_resource_a(ord: u16) -> PCSTR {
+    PCSTR(ord as usize as *const u8)
+}
+
+// ─── PE 解析器 ─────────────────────────────────────────────────────────────────
+
 pub struct PeParser {
     pub data: Vec<u8>,
     dos: IMAGE_DOS_HEADER,
@@ -118,7 +138,6 @@ impl PeParser {
         if nt.Signature != IMAGE_NT_SIGNATURE {
             return Err(anyhow!("Invalid NT signature"));
         }
-        // 32位检测
         if nt.OptionalHeader.Magic == 0x10b {
             return Err(anyhow!("32-bit PE detected — not supported in this version"));
         }
@@ -158,20 +177,23 @@ impl PeParser {
         &self.sections
     }
 
-    fn rva_to_offset(&self, rva: u32) -> Option<usize> {
+    // 使用 VirtualSize 判断边界
+    pub fn rva_to_offset(&self, rva: u32) -> Option<usize> {
         if rva < self.nt.OptionalHeader.SizeOfHeaders {
             return Some(rva as usize);
         }
         for sec in &self.sections {
             let start = sec.VirtualAddress;
-            let end = start + sec.SizeOfRawData;
+            let end = start + sec.VirtualSize;
             if rva >= start && rva < end {
+                if sec.SizeOfRawData == 0 { return None; }
                 return Some((sec.PointerToRawData + (rva - start)) as usize);
             }
         }
         None
     }
 
+    // 支持名称和序号导出
     pub fn get_export_rva(&self, target: &str) -> Option<usize> {
         let export_dir = self.nt.OptionalHeader.DataDirectory[0];
         if export_dir.VirtualAddress == 0 || export_dir.Size == 0 {
@@ -181,14 +203,27 @@ impl PeParser {
         let data = &self.data;
         if offset + 40 > data.len() { return None; }
         let base = offset;
-        let num_names = u32::from_le_bytes(data[base+24..base+28].try_into().unwrap()) as usize;
+        let _num_names = u32::from_le_bytes(data[base+24..base+28].try_into().unwrap()) as usize;
+        let num_funcs = u32::from_le_bytes(data[base+20..base+24].try_into().unwrap()) as usize;
         let addr_names = u32::from_le_bytes(data[base+32..base+36].try_into().unwrap());
         let addr_ordinals = u32::from_le_bytes(data[base+36..base+40].try_into().unwrap());
         let addr_funcs = u32::from_le_bytes(data[base+28..base+32].try_into().unwrap());
+
+        if let Some(rva) = self.find_export_by_name(addr_names, addr_ordinals, addr_funcs, target) {
+            return Some(rva);
+        }
+        if let Ok(ord) = target.parse::<u16>() {
+            return self.find_export_by_ordinal(addr_funcs, num_funcs, ord);
+        }
+        None
+    }
+
+    fn find_export_by_name(&self, addr_names: u32, addr_ordinals: u32, addr_funcs: u32, target: &str) -> Option<usize> {
         let name_off = self.rva_to_offset(addr_names)?;
         let ord_off = self.rva_to_offset(addr_ordinals)?;
         let func_off = self.rva_to_offset(addr_funcs)?;
-
+        let data = &self.data;
+        let num_names = (self.nt.OptionalHeader.DataDirectory[0].Size / 4) as usize;
         for i in 0..num_names {
             let nrva_ptr = name_off + i * 4;
             if nrva_ptr + 4 > data.len() { continue; }
@@ -210,6 +245,18 @@ impl PeParser {
         None
     }
 
+    fn find_export_by_ordinal(&self, addr_funcs: u32, num_funcs: usize, ord: u16) -> Option<usize> {
+        let func_off = self.rva_to_offset(addr_funcs)?;
+        let data = &self.data;
+        let idx = ord as usize;
+        if idx >= num_funcs { return None; }
+        let fptr = func_off + idx * 4;
+        if fptr + 4 > data.len() { return None; }
+        let frva = u32::from_le_bytes(data[fptr..fptr+4].try_into().unwrap());
+        Some(frva as usize)
+    }
+
+    // 重定位处理
     pub fn apply_relocations_remote(&self, handle: HANDLE, remote_base: *mut std::ffi::c_void, delta: isize) -> Result<(), String> {
         let reloc_dir = self.nt.OptionalHeader.DataDirectory[5];
         if reloc_dir.VirtualAddress == 0 || reloc_dir.Size == 0 { return Ok(()); }
@@ -273,7 +320,8 @@ impl PeParser {
         Ok(())
     }
 
-    pub fn fill_imports_remote(&self, handle: HANDLE, remote_base: *mut std::ffi::c_void) -> Result<(), String> {
+    // 新版导入填充（在目标进程中解析地址）
+    pub fn fill_imports_remote_fixed(&self, pid: u32, handle: HANDLE, remote_base: *mut std::ffi::c_void) -> Result<(), String> {
         let import_dir = self.nt.OptionalHeader.DataDirectory[1];
         if import_dir.VirtualAddress == 0 || import_dir.Size == 0 { return Ok(()); }
         let mut offset = self.rva_to_offset(import_dir.VirtualAddress)
@@ -293,15 +341,23 @@ impl PeParser {
             let dll_name = std::str::from_utf8(&self.data[noff..nend])
                 .map_err(|_| "Invalid DLL name")?;
 
-            let wide: Vec<u16> = std::ffi::OsStr::new(dll_name).encode_wide().chain(Some(0)).collect();
-            let hmod = unsafe { GetModuleHandleW(PCWSTR(wide.as_ptr())) };
-            let hmod = match hmod {
-                Ok(h) => h,
-                Err(_) => unsafe {
-                    LoadLibraryW(PCWSTR(wide.as_ptr()))
-                        .map_err(|e| format!("Cannot load {}: {:?}", dll_name, e))?
+            // 获取目标进程中该 DLL 的基址，若未加载则远程加载
+            let module_base = match Self::get_remote_module_base(pid, dll_name) {
+                Ok(base) => base,
+                Err(_) => {
+                    Self::remote_load_library(pid, dll_name)
+                        .map_err(|e| format!("Failed to load {}: {}", dll_name, e))?
                 }
             };
+
+            // 在注入器进程中加载该 DLL 以解析导出表（临时）
+            let wide: Vec<u16> = std::ffi::OsStr::new(dll_name).encode_wide().chain(Some(0)).collect();
+            let local_mod = unsafe { LoadLibraryW(PCWSTR(wide.as_ptr())) }
+                .map_err(|e| format!("LoadLibraryW local failed for {}: {:?}", dll_name, e))?;
+            // 将 windows 的 HMODULE 转为 winapi 的 HMODULE
+            let local_mod_winapi = local_mod.0 as WinapiHMODULE;
+            let local_base = unsafe { GetModuleHandleW(PCWSTR(wide.as_ptr())) }
+                .map_err(|_| "GetModuleHandleW local failed")? .0 as usize;
 
             let thunk_rva = if desc.OriginalFirstThunk != 0 { desc.OriginalFirstThunk } else { desc.FirstThunk };
             let toff = self.rva_to_offset(thunk_rva).ok_or("Invalid thunk RVA")?;
@@ -314,11 +370,11 @@ impl PeParser {
                 let tv = u64::from_le_bytes(self.data[tptr..tptr+8].try_into().unwrap());
                 if tv == 0 { break; }
 
-                let func_addr = if (tv & IMAGE_ORDINAL_FLAG64) != 0 {
+                let func_rva = if (tv & IMAGE_ORDINAL_FLAG64) != 0 {
                     let ord = (tv & 0xFFFF) as u16;
-                    // 正确方式：GetProcAddress 会检查高16位为0时按ordinal处理
-                    unsafe { GetProcAddress(hmod, PCSTR(ord as usize as *const u8)) }
-                        .map(|a| a as u64).unwrap_or(0)
+                    let addr = unsafe { GetProcAddress(local_mod, make_int_resource_a(ord)) }
+                        .ok_or("GetProcAddress by ordinal failed")? as usize;
+                    addr - local_base
                 } else {
                     let nrva = tv as u32;
                     let nptr = self.rva_to_offset(nrva).ok_or("Invalid import name RVA")?;
@@ -327,24 +383,128 @@ impl PeParser {
                     while nend < self.data.len() && self.data[nend] != 0 { nend += 1; }
                     let fname = std::str::from_utf8(&self.data[nptr+2..nend])
                         .map_err(|_| "Invalid function name")?;
-                    unsafe { GetProcAddress(hmod, PCSTR(fname.as_ptr())) }
-                        .map(|a| a as u64).unwrap_or(0)
+                    let addr = unsafe { GetProcAddress(local_mod, PCSTR(fname.as_ptr())) }
+                        .ok_or_else(|| format!("GetProcAddress {} not found", fname))? as usize;
+                    addr - local_base
                 };
 
-                if func_addr == 0 {
-                    return Err(format!("Cannot resolve {} import", dll_name));
-                }
-
+                let target_addr = module_base + func_rva;
                 let iat_addr = (remote_base as usize + iat_rva as usize + i * 8) as *mut std::ffi::c_void;
                 let mut written = 0usize;
                 unsafe {
-                    WriteProcessMemory(handle, iat_addr, &func_addr as *const u64 as *const std::ffi::c_void, 8, Some(&mut written))
+                    WriteProcessMemory(handle, iat_addr, &target_addr as *const usize as *const std::ffi::c_void, 8, Some(&mut written))
                         .map_err(|e| format!("IAT write failed: {:?}", e))?;
                 }
                 i += 1;
             }
+            // 释放本地加载的 DLL（使用 winapi 的 FreeLibrary）
+            unsafe { FreeLibrary(local_mod_winapi); }
             offset += std::mem::size_of::<IMAGE_IMPORT_DESCRIPTOR>();
         }
         Ok(())
     }
+
+    // 获取远程进程模块基址（使用 winapi 的 Toolhelp）
+    pub fn get_remote_module_base(pid: u32, dll_name: &str) -> Result<usize, InjectorError> {
+        use winapi::shared::minwindef::DWORD;
+
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid as DWORD) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(InjectorError::CommunicationError("Failed to create snapshot".into()));
+        }
+
+        let mut entry: MODULEENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
+
+        let ok = unsafe { Module32FirstW(snapshot, &mut entry) };
+        if ok == 0 {
+            unsafe { WinapiCloseHandle(snapshot); }
+            return Err(InjectorError::CommunicationError("Module32First failed".into()));
+        }
+
+        let mut found = None;
+        loop {
+            let name_wide = &entry.szModule;
+            let mut len = 0;
+            while len < 256 && name_wide[len] != 0 { len += 1; }
+            let name = String::from_utf16_lossy(&name_wide[..len]);
+            if name.eq_ignore_ascii_case(dll_name) {
+                found = Some(entry.modBaseAddr as usize);
+                break;
+            }
+            if unsafe { Module32NextW(snapshot, &mut entry) } == 0 {
+                break;
+            }
+        }
+
+        unsafe { WinapiCloseHandle(snapshot); }
+        found.ok_or(InjectorError::CommunicationError(format!("Module {} not found in target", dll_name)))
+    }
+
+    // 远程加载 DLL（使用 windows 的 LoadLibraryW 远程注入）
+    pub fn remote_load_library(pid: u32, dll_name: &str) -> Result<usize, InjectorError> {
+        use windows::Win32::System::Memory::{VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE};
+        use windows::Win32::System::Threading::{CreateRemoteThread, WaitForSingleObject, GetExitCodeThread, OpenProcess, PROCESS_CREATE_THREAD, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_WRITE, PROCESS_VM_READ};
+        use std::ffi::OsStr;
+
+        let handle = unsafe {
+            OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, false, pid)
+        }.map_err(|_| InjectorError::ProcessNotFound("Cannot open process".into()))?;
+
+        let wide: Vec<u16> = OsStr::new(dll_name).encode_wide().chain(Some(0)).collect();
+        let size = wide.len() * 2;
+        let remote = unsafe {
+            VirtualAllocEx(handle, None, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+        };
+        if remote.is_null() {
+            let _ = unsafe { CloseHandle(handle) };
+            return Err(InjectorError::MemoryAllocFailed(0));
+        }
+        let mut written = 0usize;
+        unsafe {
+            WriteProcessMemory(handle, remote, wide.as_ptr() as *const std::ffi::c_void, size, Some(&mut written))
+                .map_err(|_| InjectorError::CommunicationError("WriteProcessMemory failed".into()))?;
+        }
+
+        let k32 = "kernel32.dll\0".encode_utf16().collect::<Vec<_>>();
+        let hmod = unsafe { GetModuleHandleW(PCWSTR(k32.as_ptr())) }
+            .map_err(|_| InjectorError::CommunicationError("GetModuleHandleW failed".into()))?;
+        let addr = unsafe { GetProcAddress(hmod, PCSTR("LoadLibraryW\0".as_ptr())) }
+            .ok_or(InjectorError::ExportNotFound("LoadLibraryW".into()))? as *const std::ffi::c_void;
+
+        let thread = unsafe {
+            CreateRemoteThread(handle, None, 0, Some(std::mem::transmute(addr)), Some(remote), 0, None)
+        };
+        let th = thread.map_err(|_| InjectorError::CommunicationError("CreateRemoteThread failed".into()))?;
+
+        let wait = unsafe { WaitForSingleObject(th, 30000) };
+        if wait == windows::Win32::Foundation::WAIT_TIMEOUT {
+            let _ = unsafe { CloseHandle(th); VirtualFreeEx(handle, remote, 0, MEM_RELEASE); CloseHandle(handle); };
+            return Err(InjectorError::Timeout);
+        }
+        let mut code = 0u32;
+        unsafe { GetExitCodeThread(th, &mut code).ok(); }
+        let _ = unsafe { CloseHandle(th); VirtualFreeEx(handle, remote, 0, MEM_RELEASE); CloseHandle(handle); };
+        if code == 0 {
+            Err(InjectorError::DllLoadFailed(format!("LoadLibraryW returned NULL for {}", dll_name)))
+        } else {
+            Ok(code as usize)
+        }
+    }
+}
+
+// 公共函数：检查 DLL 位数是否匹配目标进程。
+// 注意：当前 ManualMap / Reflective 实现仅支持 64 位，因此这里明确拒绝 32 位，
+// 避免 UI 放行后底层再报 "Not 64-bit" 的自相矛盾。
+pub fn check_dll_architecture(dll_path: &Path, target_pid: u32) -> Result<(), InjectorError> {
+    let data = fs::read(dll_path).map_err(|e| InjectorError::PeParseFailed(e.to_string()))?;
+    let pe = PeParser::new(data).map_err(|e| InjectorError::PeParseFailed(e.to_string()))?;
+    if !pe.is_64bit() {
+        return Err(InjectorError::ArchMismatch("Only 64-bit DLLs are supported in this build".into()));
+    }
+    let target_64 = super::is_process_64bit(target_pid)?;
+    if !target_64 {
+        return Err(InjectorError::ArchMismatch("Only 64-bit target processes are supported in this build".into()));
+    }
+    Ok(())
 }

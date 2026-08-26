@@ -36,7 +36,7 @@
 - 语言：**Rust**（2021 edition）
 - 目标平台：**Windows**
 - 授权协议：**Apache-2.0**
-- 当前版本：**v1.1.0**
+- 当前版本：**v1.0.2**
 
 ### 依赖库（编译时自动下载）
 `windows` · `sysinfo` · `rfd` · `inquire` · `anyhow` · `thiserror` · `chrono` · `winres`
@@ -58,10 +58,10 @@ FlashDllInjector/
 │   │   ├── pe_util.rs      # PE 文件解析
 │   │   └── mod.rs          # 注入入口与公共类型
 │   ├── logger.rs         # 日志
-│   ├── error.rs          # 错误类型
-│   └── hide.rs           # 用户态反检测（可选模块）
+│   └── error.rs          # 错误类型
 ├── fdi/                  # 覆盖层 core.dll（电影开场动画）
 ├── jar_loader/           # JNI 相关辅助库（可选）
+├── module_hide/          # PEB 模块隐藏（被注入 DLL 自隐藏）
 ├── package.bat           # 一键编译打包脚本
 ├── build.rs              # 编译时写入图标/版本信息
 ├── icon.ico              # 程序图标
@@ -186,15 +186,19 @@ FlashDllInjector/
 
 ## 更新日志
 
-### v1.1.0（2026-08-24）稳定性修复版
-修复了多项导致崩溃或行为错误的问题：
+### v1.0.2（2026-08-24）稳定性与隐蔽性增强版
+本版本聚焦注入稳定性与隐蔽性（供反作弊研究/测试参考）：
 
-- **ManualMap 节区保护位映射**：原来所有节区都映射成 `PAGE_EXECUTE_READWRITE`，形同虚设；现改为按 PE `Characteristics` 正确映射为 `PAGE_EXECUTE_READ` / `PAGE_READWRITE` / `PAGE_NOACCESS` 等。
-- **Reflective 重定位缺失**：原来完全不做重定位，基址不匹配时 DLL 内部绝对地址全部指向错误内存、必崩；现注入前检测 `delta`，非零时调用重定位修复逻辑。
-- **32 位 PE 误解析**：原来直接按 64 位结构体解析，遇到 32 位 DLL 会越界读内存导致崩溃或错误数据；现检查 `OptionalHeader.Magic`，发现 `0x10b`（32 位）时明确报错返回。
-- **GetProcAddress ordinal 传参错误**：按序号导入时原来把 ordinal 直接当指针传给 `PCSTR`，小序号值会被当成内存地址解引用；现改用 `GetProcAddress(hmod, PCSTR(MAKEINTRESOURCEA(ord)))` 正确方式。
-- **窗口标题获取废代码**：`get_window_title_by_pid` 原来回调不回写数据、永远返回空字符串；现重写为带状态的回调，找到目标 PID 的窗口后提取标题并立即终止枚举。
-- **进程选择 PID 解析错位**：原来用 `split_whitespace().nth(1)` 取 PID，进程名/标题含空格时会解析错位；现改用索引精确匹配，彻底杜绝字符串解析歧义。
+- **新增 `module_hide` 模块隐藏**：被注入的 DLL 会从目标进程 PEB 的 InLoadOrder / InMemoryOrder / InInitializationOrder 三条加载链表中摘除，并清空名字字符串，使 `GetModuleHandle`、模块枚举等无法再发现该模块——对标主流注入脚本的常见收尾手段。已接入 `core.dll` 与 `jar_loader`。
+- **重写 `jar_loader` 的 JNI 代码**：按 `jni 0.21` 正确 API 重写，修复编译与链接问题（`JNI_GetCreatedJavaVMs` 改为从 `jvm.dll` 动态解析），使其可正常构建并打进发布包。
+- **明确仅支持 64 位**：`check_dll_architecture` 现在对 32 位 DLL 或 32 位目标进程直接报错，消除「UI 放行、底层却报 Not 64-bit」的自相矛盾。
+- **ManualMap 节区保护位映射**：按 PE `Characteristics` 正确映射为 `PAGE_EXECUTE_READ` / `PAGE_READWRITE` / `PAGE_NOACCESS` 等。
+- **Reflective 重定位缺失**：注入前检测 `delta`，非零时调用重定位修复逻辑，避免基址不匹配导致崩溃。
+- **32 位 PE 误解析**：检查 `OptionalHeader.Magic`，遇到 32 位 DLL 时明确报错返回，避免越界读取。
+- **GetProcAddress ordinal 传参**：改用 `MAKEINTRESOURCEA` 语义，避免小序号被当作内存地址解引用。
+- **窗口标题获取废代码**：重写为带状态的回调，找到目标 PID 的窗口后提取标题并立即终止枚举。
+- **进程选择 PID 解析错位**：改用索引精确匹配，杜绝进程名/标题含空格时的解析歧义。
+- **版本号统一**：日志版本号改用 `env!("CARGO_PKG_VERSION")`，与 `Cargo.toml` 自动同步。
 
 ---
 

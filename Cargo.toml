@@ -1,6 +1,6 @@
 [package]
 name = "FlashDllInjector"
-version = "1.1.0"
+version = "1.0.2"
 edition = "2021"
 authors = ["FastNow Studio <contact@fastnow.studio>"]
 license = "Apache-2.0"
@@ -17,7 +17,9 @@ windows = { version = "0.58", features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Security",
+    "Win32_System_SystemInformation",
 ] }
+winapi = { version = "0.3", features = ["tlhelp32", "libloaderapi", "winbase", "winnt"] }
 anyhow = "1.0"
 sysinfo = "0.30"
 rfd = "0.14"

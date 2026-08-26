@@ -1,5 +1,6 @@
 use super::pe_util::PeParser;
 use super::{InjectMethod, InjectResult};
+use crate::error::InjectorError;
 use std::fs;
 use std::path::Path;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
@@ -16,7 +17,6 @@ use windows::Win32::System::Threading::{
 };
 
 fn build_dllmain_stub(remote_base: usize, entry: usize) -> Vec<u8> {
-    // x64: mov rcx, remote_base; mov edx, 1; xor r8d, r8d; mov rax, entry; call rax; xor rax, rax; ret
     let mut c = Vec::with_capacity(32);
     c.push(0x48); c.push(0xB9);
     c.extend_from_slice(&remote_base.to_le_bytes());
@@ -34,7 +34,6 @@ fn prot_from_chars(chars: u32) -> PAGE_PROTECTION_FLAGS {
     let executable = chars & 0x20000000 != 0;
     let readable   = chars & 0x40000000 != 0;
     let writable   = chars & 0x80000000 != 0;
-
     match (executable, readable, writable) {
         (true,  true,  true)  => PAGE_EXECUTE_READWRITE,
         (true,  true,  false) => PAGE_EXECUTE_READ,
@@ -47,19 +46,21 @@ fn prot_from_chars(chars: u32) -> PAGE_PROTECTION_FLAGS {
     }
 }
 
-pub fn inject(pid: u32, dll_path: &Path) -> Result<InjectResult, String> {
+pub fn inject(pid: u32, dll_path: &Path) -> Result<InjectResult, InjectorError> {
     crate::logger::info(&format!("[ManualMap] {}", dll_path.display()));
 
-    let data = fs::read(dll_path).map_err(|e| e.to_string())?;
-    let pe = PeParser::new(data.clone()).map_err(|e| e.to_string())?;
-    if !pe.is_64bit() { return Err("Not 64-bit".into()); }
+    let data = fs::read(dll_path).map_err(|e| InjectorError::PeParseFailed(e.to_string()))?;
+    let pe = PeParser::new(data.clone()).map_err(|e| InjectorError::PeParseFailed(e.to_string()))?;
+    if !pe.is_64bit() {
+        return Err(InjectorError::ArchMismatch("Not 64-bit".into()));
+    }
 
     let handle: HANDLE = unsafe {
         OpenProcess(
             PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
             false, pid,
         )
-    }.map_err(|e| format!("OpenProcess: {:?}", e))?;
+    }.map_err(|e| InjectorError::ProcessNotFound(format!("OpenProcess: {:?}", e)))?;
 
     let size = pe.size_of_image();
     let base = unsafe {
@@ -67,14 +68,14 @@ pub fn inject(pid: u32, dll_path: &Path) -> Result<InjectResult, String> {
     };
     if base.is_null() {
         let _ = unsafe { CloseHandle(handle) };
-        return Err("VirtualAllocEx failed".into());
+        return Err(InjectorError::MemoryAllocFailed(0));
     }
 
     // Map headers
     let mut w = 0usize;
     unsafe {
         WriteProcessMemory(handle, base, data.as_ptr() as *const std::ffi::c_void, pe.size_of_headers(), Some(&mut w))
-            .map_err(|e| format!("Write header: {:?}", e))?;
+            .map_err(|e| InjectorError::CommunicationError(format!("Write header: {:?}", e)))?;
     }
 
     // Map sections
@@ -86,27 +87,27 @@ pub fn inject(pid: u32, dll_path: &Path) -> Result<InjectResult, String> {
         let addr = (base as usize + va) as *mut std::ffi::c_void;
         unsafe {
             WriteProcessMemory(handle, addr, data.as_ptr().add(off) as *const std::ffi::c_void, raw, Some(&mut w))
-                .map_err(|e| format!("Write section: {:?}", e))?;
+                .map_err(|e| InjectorError::CommunicationError(format!("Write section: {:?}", e)))?;
         }
     }
 
     // Fix relocations
     let delta = base as isize - pe.image_base() as isize;
     pe.apply_relocations_remote(handle, base, delta)
-        .map_err(|e| format!("Relocations: {}", e))?;
+        .map_err(|e| InjectorError::PeParseFailed(e))?;
 
-    // Fill imports
-    pe.fill_imports_remote(handle, base)
-        .map_err(|e| format!("Imports: {}", e))?;
+    // Fill imports using fixed method
+    pe.fill_imports_remote_fixed(pid, handle, base)
+        .map_err(|e| InjectorError::PeParseFailed(e))?;
 
-    // Set correct section protections (FIXED!)
+    // Set correct section protections
     for sec in pe.sections() {
         let addr = (base as usize + sec.VirtualAddress as usize) as *mut std::ffi::c_void;
         let prot = prot_from_chars(sec.Characteristics);
         let mut old = PAGE_PROTECTION_FLAGS(0);
         unsafe {
             VirtualProtectEx(handle, addr, sec.VirtualSize as usize, prot, &mut old)
-                .map_err(|e| format!("VirtualProtectEx: {:?}", e))?;
+                .map_err(|e| InjectorError::CommunicationError(format!("VirtualProtectEx: {:?}", e)))?;
         }
     }
 
@@ -118,15 +119,15 @@ pub fn inject(pid: u32, dll_path: &Path) -> Result<InjectResult, String> {
     };
     if stub_mem.is_null() {
         let _ = unsafe { VirtualFreeEx(handle, base, 0, MEM_RELEASE); CloseHandle(handle); };
-        return Err("Stub alloc failed".into());
+        return Err(InjectorError::MemoryAllocFailed(0));
     }
     unsafe {
         WriteProcessMemory(handle, stub_mem, stub.as_ptr() as *const std::ffi::c_void, stub.len(), Some(&mut w))
-            .map_err(|e| format!("Write stub: {:?}", e))?;
+            .map_err(|e| InjectorError::CommunicationError(format!("Write stub: {:?}", e)))?;
     }
 
     let thread = unsafe {
-        CreateRemoteThread(handle, None, 0, Some(std::mem::transmute::<*mut std::ffi::c_void, extern "system" fn(*mut std::ffi::c_void) -> u32>(stub_mem)), None, 0, None)
+        CreateRemoteThread(handle, None, 0, Some(std::mem::transmute(stub_mem)), None, 0, None)
     };
 
     match thread {
@@ -134,7 +135,7 @@ pub fn inject(pid: u32, dll_path: &Path) -> Result<InjectResult, String> {
             let wait = unsafe { WaitForSingleObject(th, 30000) };
             if wait == windows::Win32::Foundation::WAIT_TIMEOUT {
                 let _ = unsafe { TerminateThread(th, 1); CloseHandle(th); VirtualFreeEx(handle, stub_mem, 0, MEM_RELEASE); VirtualFreeEx(handle, base, 0, MEM_RELEASE); CloseHandle(handle); };
-                return Err("Timeout".into());
+                return Err(InjectorError::Timeout);
             }
             let mut code: u32 = 0;
             unsafe { GetExitCodeThread(th, &mut code).ok(); }
@@ -143,7 +144,58 @@ pub fn inject(pid: u32, dll_path: &Path) -> Result<InjectResult, String> {
         }
         Err(e) => {
             let _ = unsafe { VirtualFreeEx(handle, stub_mem, 0, MEM_RELEASE); VirtualFreeEx(handle, base, 0, MEM_RELEASE); CloseHandle(handle); };
-            Err(format!("CreateRemoteThread: {:?}", e))
+            Err(InjectorError::CommunicationError(format!("CreateRemoteThread: {:?}", e)))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const IMAGE_SCN_MEM_EXECUTE: u32 = 0x20000000;
+    const IMAGE_SCN_MEM_READ: u32 = 0x40000000;
+    const IMAGE_SCN_MEM_WRITE: u32 = 0x80000000;
+
+    #[test]
+    fn prot_exec_read_write() {
+        let chars = IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
+        assert_eq!(prot_from_chars(chars).0, PAGE_EXECUTE_READWRITE.0);
+    }
+
+    #[test]
+    fn prot_exec_read_only() {
+        let chars = IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ;
+        assert_eq!(prot_from_chars(chars).0, PAGE_EXECUTE_READ.0);
+    }
+
+    #[test]
+    fn prot_exec_only() {
+        let chars = IMAGE_SCN_MEM_EXECUTE;
+        assert_eq!(prot_from_chars(chars).0, PAGE_EXECUTE.0);
+    }
+
+    #[test]
+    fn prot_read_write() {
+        let chars = IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
+        assert_eq!(prot_from_chars(chars).0, PAGE_READWRITE.0);
+    }
+
+    #[test]
+    fn prot_read_only() {
+        let chars = IMAGE_SCN_MEM_READ;
+        assert_eq!(prot_from_chars(chars).0, PAGE_READONLY.0);
+    }
+
+    #[test]
+    fn prot_no_access() {
+        assert_eq!(prot_from_chars(0).0, PAGE_NOACCESS.0);
+    }
+
+    #[test]
+    fn prot_write_alone_maps_to_rw() {
+        // 仅 WRITE（可读位缺失）按 PAGE_READWRITE 处理，避免写入后不可读
+        let chars = IMAGE_SCN_MEM_WRITE;
+        assert_eq!(prot_from_chars(chars).0, PAGE_READWRITE.0);
     }
 }

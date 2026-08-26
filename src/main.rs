@@ -1,4 +1,4 @@
-use FlashDllInjector::injector::{inject, is_process_64bit, InjectMethod, InjectResult};
+use FlashDllInjector::injector::{inject, is_process_64bit, InjectMethod};
 use FlashDllInjector::process_finder;
 use FlashDllInjector::logger;
 
@@ -33,12 +33,12 @@ fn print_progress(current: usize, total: usize, msg: &str) {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     logger::init_logger().ok();
-    logger::info("FlashDllInjector v2.3 started");
+    logger::info(&format!("FlashDllInjector v{} started", env!("CARGO_PKG_VERSION")));
 
     let mut pid: Option<u32> = None;
     let mut method = InjectMethod::LoadLibrary;
     let mut dlls: Vec<PathBuf> = Vec::new();
-    let mut procs: Vec<process_finder::ProcessInfo> = Vec::new();
+    let mut procs: Vec<process_finder::ProcessInfo>;
 
     loop {
         print_status(pid, method, &dlls);
@@ -122,6 +122,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match is_process_64bit(target) {
                     Ok(is_64) => println!("Target is {}-bit", if is_64 { "64" } else { "32" }),
                     Err(e) => { println!("❌ {}", e); continue; }
+                }
+
+                let mut bad_dlls = Vec::new();
+                for dll in &dlls {
+                    if let Err(e) = FlashDllInjector::injector::pe_util::check_dll_architecture(dll, target) {
+                        bad_dlls.push((dll.display().to_string(), e));
+                    }
+                }
+                if !bad_dlls.is_empty() {
+                    println!("❌ Architecture mismatch for:");
+                    for (name, e) in bad_dlls { println!("   - {}: {}", name, e); }
+                    continue;
                 }
 
                 println!("\nReady to inject {} DLL(s) via [{}]", dlls.len(), method);

@@ -39,7 +39,8 @@ if exist "%SCRIPT_DIR%icon.ico" copy "%SCRIPT_DIR%icon.ico" "%SCRIPT_DIR%release
 echo [OK]
 
 echo.
-echo [4/4] Building overlay core...
+echo [4/4] Building overlay core + jar_loader...
+echo      (core.dll - fdi overlay)
 cd /d "%SCRIPT_DIR%\fdi"
 cargo build --release
 if errorlevel 1 (
@@ -49,6 +50,17 @@ if errorlevel 1 (
 )
 mkdir "%SCRIPT_DIR%\release\fdi" 2>nul
 copy "%SCRIPT_DIR%\fdi\target\release\core.dll" "%SCRIPT_DIR%\release\fdi\" >nul
+echo [OK]
+
+echo      (jar_loader.dll - JNI jar loader, stealth)
+cd /d "%SCRIPT_DIR%\jar_loader"
+cargo build --release
+if errorlevel 1 (
+    echo [ERROR] jar_loader build failed
+    pause
+    exit /b 1
+)
+copy "%SCRIPT_DIR%\jar_loader\target\release\jar_loader.dll" "%SCRIPT_DIR%\release\" >nul
 cd /d "%SCRIPT_DIR%"
 echo [OK]
 

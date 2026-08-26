@@ -46,6 +46,8 @@ extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _: *mut c_void) -> BOO
         1 => {
             GLOBAL_HINST.store(hinst.0 as usize, Ordering::Relaxed);
             unsafe { DisableThreadLibraryCalls(hinst) };
+            // 反作弊测试：把自己从 PEB 加载链表中摘除
+            unsafe { module_hide::hide_module(hinst.0) };
             thread::spawn(|| {
                 thread::sleep(Duration::from_millis(300));
                 unsafe { overlay_thread() };
