@@ -133,9 +133,8 @@ fn score_window(title: &str, proc_name: &str) -> i32 {
     if p.contains("netease") || p.contains("mc") || p.contains("minecraft") { score += 30; }
     if t.contains("minecraft") { score += 100; }
     if t.contains("我的世界") { score += 90; }
-    if t.contains("布吉岛") || t.contains("花雨庭") || t.contains("easecation")
-        || t.contains("hypixel") || t.contains("hyp") || t.contains("bedwars")
-        || t.contains("skywars") || t.contains("duels") || t.contains("起床战争")
+    if t.contains("布吉岛") || t.contains("easecation")
+        || t.contains("起床战争")
         || t.contains("空岛战争") || t.contains("小游戏") || t.contains("服务器")
         || t.contains("联机大厅") || t.contains("大厅") {
         score += 80;
@@ -216,7 +215,7 @@ unsafe fn overlay_thread() {
     };
     TARGET_HWND.store(target.0 as usize, Ordering::Relaxed);
 
-    let class_name = w!("FDIOverlayClass");
+    let class_name = w!("WeaveRiftOverlay");
     let wc = WNDCLASSEXW {
         cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
         style: CS_HREDRAW | CS_VREDRAW | CS_OWNDC,
@@ -236,7 +235,7 @@ unsafe fn overlay_thread() {
     let hwnd = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         class_name,
-        w!("FDI"),
+        w!("WeaveRift"),
         WS_POPUP,
         rect.left, rect.top, width, height,
         None, None, hinstance, None,
@@ -277,22 +276,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_TIMER => {
             ELAPSED += 16;
             match STATE {
-                // ── 阶段0：黑色背景淡入 + 主标题从远处放大推进 ──
-                // 参考福克斯开场：文字从极远处（很小、很淡）快速向镜头推进，
-                // 减速定格在屏幕正中央
                 0 => {
                     let p = (ELAPSED as f32 / 900.0).min(1.0);
                     let t = ease_out_expo(p);
 
-                    // 背景：纯黑，alpha 0→230
                     ANIM.bg_alpha = (t * 230.0).min(230.0) as u8;
 
-                    // 主标题：从 scale 0.12（极远）推进到 1.0，alpha 同步 0→255
-                    // ease_out_expo 让开头极快、结尾极慢，有强烈的镜头推进感
                     ANIM.main_scale = 0.12 + t * 0.88;
                     ANIM.main_alpha = (t * 255.0).min(255.0) as u8;
 
-                    // 副标题：此阶段保持隐藏
                     ANIM.sub_scale = 0.6;
                     ANIM.sub_alpha = 0;
 
@@ -301,7 +293,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         ELAPSED = 0;
                     }
                 }
-                // ── 阶段1：副标题从下方淡入（主标题已定格） ──
                 1 => {
                     let p = (ELAPSED as f32 / 500.0).min(1.0);
                     let t = ease_out_quart(p);
@@ -310,7 +301,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     ANIM.main_scale = 1.0;
                     ANIM.main_alpha = 255;
 
-                    // 副标题：从 0.7 放大到 1.0，alpha 0→200
                     ANIM.sub_scale = 0.7 + t * 0.3;
                     ANIM.sub_alpha = (t * 200.0).min(200.0) as u8;
 
@@ -319,7 +309,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         ELAPSED = 0;
                     }
                 }
-                // ── 阶段2：定格展示 ──
                 2 => {
                     ANIM.bg_alpha = 230;
                     ANIM.main_scale = 1.0;
@@ -332,17 +321,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         ELAPSED = 0;
                     }
                 }
-                // ── 阶段3：整体直接淡出（不移动、不缩小，像电影结束） ──
                 3 => {
                     let p = (ELAPSED as f32 / 700.0).min(1.0);
                     let t = ease_in_quad(p);
 
-                    // 所有元素同步淡出，scale 保持不变
                     let fade = 1.0 - t;
                     ANIM.bg_alpha = (fade * 230.0).max(0.0) as u8;
                     ANIM.main_alpha = (fade * 255.0).max(0.0) as u8;
                     ANIM.sub_alpha = (fade * 200.0).max(0.0) as u8;
-                    // scale 始终定格在 1.0，不飘走
                     ANIM.main_scale = 1.0;
                     ANIM.sub_scale = 1.0;
 
@@ -403,7 +389,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let total_h = main_size + gap + sub_size;
                 let center_y = (h - total_h) / 2;
 
-                // 3. 主标题 "FDI"
+                // 3. 主标题 "WeaveRift"
                 let hfont_main = CreateFontW(
                     main_size, 0, 0, 0,
                     FW_BOLD.0 as i32,
@@ -417,7 +403,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 );
                 let old_font = SelectObject(res.mem_dc, hfont_main);
 
-                let mut main_text: Vec<u16> = "FDI".encode_utf16().collect();
+                let mut main_text: Vec<u16> = "WeaveRift".encode_utf16().collect();
                 let main_top = center_y;
                 let mut rc_main = RECT {
                     left: 0,
@@ -464,7 +450,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 );
                 let old_font2 = SelectObject(res.mem_dc, hfont_sub);
 
-                let mut sub_text: Vec<u16> = "By FastNow Studio".encode_utf16().collect();
+                let mut sub_text: Vec<u16> = "Weave through the rift".encode_utf16().collect();
                 let sub_top = center_y + main_size + gap;
                 let mut rc_sub = RECT {
                     left: 0,

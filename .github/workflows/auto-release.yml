@@ -61,20 +61,20 @@ jobs:
           Write-Host "--- description ---"
           Write-Host $desc
 
-      - name: Build FlashDllInjector.exe
+      - name: Build WeaveRift.exe
         run: cargo build --release
 
-      - name: Build fdi/core.dll
-        working-directory: fdi
+      - name: Build WeaveRift/core.dll
+        working-directory: WeaveRift
         run: cargo build --release
 
       - name: Assemble release folder
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path release\fdi | Out-Null
-          Copy-Item target\release\FlashDllInjector.exe release\ -Force
+          New-Item -ItemType Directory -Force -Path release\WeaveRift | Out-Null
+          Copy-Item target\release\WeaveRift.exe release\ -Force
           if (Test-Path icon.ico) { Copy-Item icon.ico release\ -Force }
-          Copy-Item fdi\target\release\core.dll release\fdi\ -Force
+          Copy-Item WeaveRift\target\release\core.dll release\WeaveRift\ -Force
           Write-Host "=== release contents ==="
           Get-ChildItem -Recurse release | Select-Object FullName, Length
 

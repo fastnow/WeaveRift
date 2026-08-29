@@ -1,6 +1,6 @@
 {
-  "title": "FlashDllInjector v1.0.2",
-  "version": "1.0.2",
-  "description": "本版本为稳定性与隐蔽性增强版：\n- 新增 module_hide 模块隐藏：被注入的 DLL 会从目标进程 PEB 加载链表中摘除（对标主流注入脚本）\n- 重写 jar_loader 的 JNI 代码并修复编译问题，使其可正常构建与打包\n- 明确仅支持 64 位 DLL 与 64 位目标进程，消除 32 位路径自相矛盾\n- 修复按序号导入函数时 GetProcAddress 传参错误，改用 MAKEINTRESOURCEA 语义\n- 修复 ManualMap 节区保护位映射、Reflective 重定位缺失、32 位 PE 误解析越界读取\n- 重写进程窗口标题获取逻辑，修复进程选择时 PID 解析错位问题\n- 版本号统一由 Cargo.toml 生成，日志不再出现版本号不一致",
-  "release": true
+  "title": "WeaveRift v1.0.3",
+  "version": "1.0.3",
+  "description": "本版本为双模注入框架的首个版本：\n- 项目正式更名为 WeaveRift，彻底移除 FlashDllInjector 及 FDI 残留\n- 支持 Classic 模式（DLL 注入：LoadLibraryW/Reflective/ManualMap）与 Weave 模式（Java Agent 加载）\n- 新增 module_hide 反检测模块，被注入的 DLL 从 PEB 加载链摘除\n- 修复 ManualMap 导入表解析错误，改用目标进程内解析函数地址\n- 修复 Reflective 重定位处理、节区保护位映射、32 位 PE 误解析\n- 进程窗口标题匹配优化，支持多进程选择\n- 错误处理统一使用 InjectorError，资源泄漏全面修复\n- 新增 IPC 共享内存传递 Agent JAR 路径，实现 Weave 模式加载\n- 支持 CLI 命令行参数（--mode classic/weave --pid --dll/--agent）\n- 动画 core.dll 与 jar_loader.dll 统一置于 release/WeaveRift/ 子目录\n- Weave 模式也会注入 core.dll 显示启动动画\n- 版本号自动从 Cargo.toml 读取，日志和资源文件统一\n- 注意：Weave 模式需要目标 JAR 为合法的 Java Agent（含 agentmain），普通模组 JAR 不会被自动执行。",
+  "release":false
 }

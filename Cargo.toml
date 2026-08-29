@@ -1,11 +1,11 @@
 [package]
-name = "FlashDllInjector"
-version = "1.0.2"
+name = "WeaveRift"
+version = "1.0.3"
 edition = "2021"
 authors = ["FastNow Studio <contact@fastnow.studio>"]
 license = "Apache-2.0"
-description = "High-performance Windows DLL injector with LoadLibraryW, Reflective and ManualMap support"
-repository = "https://github.com/fastnow/FlashDllInjector"
+description = "WeaveRift - dual-mode Minecraft injector (DLL + Java Agent)"
+repository = "https://github.com/fastnow/WeaveRift"
 publish = false
 
 [dependencies]
@@ -26,6 +26,7 @@ rfd = "0.14"
 inquire = "0.7"
 chrono = "0.4"
 thiserror = "1.0"
+clap = { version = "4.5", features = ["derive"] }
 
 [profile.release]
 opt-level = "z"

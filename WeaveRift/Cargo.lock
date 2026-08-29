@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "core"
-version = "1.1.0"
+version = "1.0.3"
 dependencies = [
  "module_hide",
  "windows",
@@ -12,7 +12,7 @@ dependencies = [
 
 [[package]]
 name = "module_hide"
-version = "1.1.0"
+version = "1.0.3"
 
 [[package]]
 name = "proc-macro2"

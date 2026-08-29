@@ -16,8 +16,8 @@
 ### 它是干什么的？
 双击运行后，它会在你本机自动完成：
 1. 清空旧的 `release` 文件夹
-2. 编译 **Release 版主程序**（`FlashDllInjector.exe`）
-3. 编译覆盖层 `fdi/core.dll`
+2. 编译 **Release 版主程序**（`WeaveRift.exe`）
+3. 编译覆盖层 `WeaveRift/core.dll`
 4. 把 `exe`、`icon.ico`、`core.dll` 按正确目录结构放到 **`release/`** 文件夹里
 
 > `release/` 就是可以直接分发 / 压缩给别人使用的成品目录。
@@ -41,7 +41,7 @@ package.bat
 ================================================
    Build Complete!
 ================================================
-Output folder: ...\FlashDllInjector\release
+Output folder: ...\WeaveRift\release
 ```
 
 ### 运行过程失败怎么办？
@@ -51,13 +51,13 @@ Output folder: ...\FlashDllInjector\release
 |------|------|------|
 | `[ERROR] cargo not found` | 没装 Rust 或没加入 PATH | 安装 Rust 并重开终端 |
 | `[ERROR] Build failed` | 代码编译报错 | 看终端里的编译错误信息，或 `cargo build --release` 单独排查 |
-| `[ERROR] Core build failed` | `fdi` 覆盖层编译失败 | 进入 `fdi` 目录单独 `cargo build --release` 排查 |
+| `[ERROR] Core build failed` | `WeaveRift` 覆盖层编译失败 | 进入 `WeaveRift` 目录单独 `cargo build --release` 排查 |
 
 > 你也可以手动编译主程序（等价于 `package.bat` 第 2 步）：
 > ```
 > cargo build --release
 > ```
-> 生成文件在 `target\release\FlashDllInjector.exe`。
+> 生成文件在 `target\release\WeaveRift.exe`。
 
 ---
 
@@ -68,7 +68,7 @@ Output folder: ...\FlashDllInjector\release
 ### 它是干什么的？
 当你把代码推送到 GitHub，且**最新一条提交信息包含 `[RELEASE]`** 时，云端会自动：
 1. 读取根目录 **`version.json`** 里的发布信息（`title` / `version` / `description` / `release`）
-2. 在 Windows 虚拟机上编译 `FlashDllInjector.exe` 和 `fdi/core.dll`
+2. 在 Windows 虚拟机上编译 `WeaveRift.exe` 和 `WeaveRift/core.dll`
 3. 打包成 **`release.zip`**
 4. 用 `version.json` 的信息创建 **GitHub Release**（附件是 `release.zip`）
 
@@ -80,8 +80,8 @@ Output folder: ...\FlashDllInjector\release
 
 ```json
 {
-  "title": "FlashDllInjector v2.3.0",
-  "version": "2.3.0",
+  "title": "WeaveRift v1.0.3",
+  "version": "1.0.3",
   "description": "本版本主要更新：\n- 修复进程筛选问题\n- 新增功能",
   "release": true
 }
@@ -114,9 +114,9 @@ git push
 ### 产物结构（`release.zip` 内）
 ```
 release.zip
-└── FlashDllInjector.exe   # 主程序
+└── WeaveRift.exe   # 主程序
 ├── icon.ico               # 图标（存在才打包）
-└── fdi/
+└── WeaveRift/
     └── core.dll           # 开场动画覆盖层
 ```
 
@@ -125,8 +125,8 @@ release.zip
 2. `Set up Rust` — 装 Rust 稳定版工具链
 3. `Rust cache` — 缓存编译产物，加速后续构建
 4. `Read version.json metadata` — 读取 `title`/`version`/`description`/`release`，把说明写入 `RELEASE_BODY.md`
-5. `Build FlashDllInjector.exe` — 编译主程序
-6. `Build fdi/core.dll` — 编译覆盖层
+5. `Build WeaveRift.exe` — 编译主程序
+6. `Build WeaveRift/core.dll` — 编译覆盖层
 7. `Assemble release folder` — 组装 `release/` 目录
 8. `Compress to release.zip` — 用 `Compress-Archive` 压缩
 9. `Create GitHub Release` — **仅当 `release=true`** 时创建 Release 并上传 `release.zip`（标题、tag、说明都来自 `version.json`）

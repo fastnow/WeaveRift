@@ -10,7 +10,7 @@ fn get_time() -> String {
 }
 
 pub fn init_logger() -> Result<(), std::io::Error> {
-    let path = std::env::temp_dir().join("FlashDllInjector.log");
+    let path = std::env::temp_dir().join("WeaveRift.log");
     // 日志无轮转，为避免无限增大，超过 1MB 时截断重写
     const MAX_BYTES: u64 = 1_048_576;
     if let Ok(meta) = std::fs::metadata(&path) {

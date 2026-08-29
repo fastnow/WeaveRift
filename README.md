@@ -1,10 +1,10 @@
-# FlashDllInjector：下一代 Minecraft Dll 注入器
+# WeaveRift：一针入隙，万物可织
 
-一个面向 **Windows + Minecraft（Java 版）** 的高性能 **DLL 注入工具**，采用命令行交互菜单。
+**WeaveRift** 是一个面向 **Windows + Minecraft（Java 版）** 的双模注入框架 —— **Classic Mode（DLL 注入）** 与 **Weave Mode（Java Agent 字节码编织）**。
 
-小白也能直接使用：启动游戏 → 运行工具 → 选中进程 → 选中 DLL → 注入，就这么简单。
+启动游戏 → 运行工具 → 选中进程 → 选择模式 → 注入。无需配置，即开即用。
 
-> **重要声明**：本工具仅用于**学习、调试、研究**等合法用途，请只对你**自己拥有或有权操作**的进程使用。未经允许向他人程序注入属于违法行为，后果自负。
+> **声明**：本工具仅限**学习、调试、研究**等合法场景，请对**你自己拥有或有权操作**的进程使用。未经授权注入他人程序属于违法行为，由使用者自行承担一切责任。
 
 ---
 
@@ -14,7 +14,7 @@
 - 自动过滤掉浏览器等无关进程（不会把 Chrome / Edge 当作目标）
 - 把你自己写的 **DLL 文件** 注入到选中的游戏进程里
 - 内置 3 种注入方式，按需选择
-- 附带一个可选的「**FDI 开场动画覆盖层**」（`core.dll`），注入后会在游戏窗口上播放一段类似电影厂牌的开场动画
+- 附带一个可选的「**WeaveRift 开场动画覆盖层**」（`core.dll`），注入后会在游戏窗口上播放一段类似电影厂牌的开场动画
 
 ---
 
@@ -24,9 +24,9 @@
 |------|------|
 | 智能进程识别 | 只显示 Java 进程，自动排除浏览器等无关进程 |
 | 三种注入方式 | `LoadLibraryW` / `Reflective` / `ManualMap` |
-| 开场动画覆盖层 | 注入 `fdi/core.dll` 可在游戏画面播放 "FDI" 电影式片头 |
+| 开场动画覆盖层 | 注入 `WeaveRift/core.dll` 可在游戏画面播放 "WeaveRift" 电影式片头 |
 | 交互式菜单 | 中文 + 图标，全程键盘选择即可操作 |
-| 自动日志 | 运行日志写入 `%TEMP%\FlashDllInjector.log` |
+| 自动日志 | 运行日志写入 `%TEMP%\WeaveRift.log` |
 | 自动判断位数 | 注入前检测目标进程是 32 位还是 64 位 |
 
 ---
@@ -36,7 +36,7 @@
 - 语言：**Rust**（2021 edition）
 - 目标平台：**Windows**
 - 授权协议：**Apache-2.0**
-- 当前版本：**v1.0.2**
+- 当前版本：**v1.0.3**
 
 ### 依赖库（编译时自动下载）
 `windows` · `sysinfo` · `rfd` · `inquire` · `anyhow` · `thiserror` · `chrono` · `winres`
@@ -46,7 +46,7 @@
 ## 目录结构
 
 ```
-FlashDllInjector/
+WeaveRift/
 ├── src/
 │   ├── main.rs           # 主程序（交互菜单）
 │   ├── lib.rs            # 库入口
@@ -59,7 +59,7 @@ FlashDllInjector/
 │   │   └── mod.rs          # 注入入口与公共类型
 │   ├── logger.rs         # 日志
 │   └── error.rs          # 错误类型
-├── fdi/                  # 覆盖层 core.dll（电影开场动画）
+├── WeaveRift/                  # 覆盖层 core.dll（电影开场动画）
 ├── jar_loader/           # JNI 相关辅助库（可选）
 ├── module_hide/          # PEB 模块隐藏（被注入 DLL 自隐藏）
 ├── package.bat           # 一键编译打包脚本
@@ -74,10 +74,10 @@ FlashDllInjector/
 
 ### 方式一：直接使用打包好的版本（推荐）
 1. 让开发者/发布方给你 **release** 文件夹，里面应该有：
-   - `FlashDllInjector.exe`（主程序）
-   - `icon.ico`（图标，可选）
-   - `fdi/core.dll`（覆盖层动画，可选，没有也不影响注入）
-2. **把整个文件夹放在一起**，不要单独挪动 exe，否则找不到 `fdi/core.dll`。
+   - `WeaveRift.exe`
+   - `icon.ico`
+   - `WeaveRift/core.dll`
+2. **把整个文件夹放在一起**，不要单独挪动 exe，否则找不到 `WeaveRift/core.dll`。
 3. 跳转到下方「🚀 小白使用教程」。
 
 ### 方式二：自己编译
@@ -88,7 +88,7 @@ FlashDllInjector/
 **一键编译打包**：直接双击 `package.bat`，它会自动：
 1. 清理旧编译产物
 2. 编译 Release 版主程序
-3. 编译 `fdi/core.dll` 覆盖层
+3. 编译 `WeaveRift/core.dll` 覆盖层
 4. 把所有文件放到 **`release/`** 文件夹里
 
 完成后打开 `release` 文件夹即可使用。
@@ -97,7 +97,7 @@ FlashDllInjector/
 > ```
 > cargo build --release
 > ```
-> 生成的文件在 `target\release\FlashDllInjector.exe`。
+> 生成的文件在 `target\release\WeaveRift.exe`。
 
 ---
 
@@ -106,10 +106,10 @@ FlashDllInjector/
 ### 第 1 步：准备 DLL
 请准备一个**你自己编译的 DLL 文件**（必须是为 Windows 编译的 `.dll`）。
 - 用什么语言写都可以，只要能生成 Windows DLL 即可（C/C++、Rust 等）。
-- 打包好的 `fdi/core.dll` 是覆盖层动画，不是必须的；如果你只是测试，可以直接注入它看效果。
+- 打包好的 `WeaveRift/core.dll` 是覆盖层动画，不是必须的；如果你只是测试，可以直接注入它看效果。
 
 ### 第 2 步：以管理员身份运行工具
-**重要！** 找到 `FlashDllInjector.exe`，**右键 → 以管理员身份运行**。
+**重要！** 找到 `WeaveRift.exe`，**右键 → 以管理员身份运行**。
 > 因为要向别的进程写内存，必须拥有管理员权限，否则会报「OpenProcess 失败 / 权限不足」。
 
 ### 第 3 步：先启动 Minecraft
@@ -140,7 +140,7 @@ FlashDllInjector/
 ### 第 7 步：执行注入
 选择 **`🚀 Execute Injection`**，工具会先显示目标位数（64/32），然后询问 **Execute?**，回车确认。
 - 如果一切正常，会看到类似 `✅ All injected successfully.` 的提示。
-- 如果 `fdi/core.dll` 存在，会先自动注入覆盖层动画。
+- 如果 `WeaveRift/core.dll` 存在，会先自动注入覆盖层动画。
 
 ### 第 8 步：退出
 选择 **`👋 Exit`** 退出程序。
@@ -164,7 +164,7 @@ FlashDllInjector/
 - 如果被杀毒软件拦截或误删，请**把它加入白名单 / 信任区**。这通常是误报，但仍请自行判断来源是否可靠。
 
 ### 日志在哪里
-- 日志自动保存在 `%TEMP%\FlashDllInjector.log`。
+- 日志自动保存在 `%TEMP%\WeaveRift.log`。
 - 报错时打开这个文件，把内容发给开发者更便于排查。
 - `%TEMP%` 通常在 `C:\Users\你的用户名\AppData\Local\Temp`。
 
@@ -186,7 +186,7 @@ FlashDllInjector/
 
 ## 更新日志
 
-### v1.0.2（2026-08-24）稳定性与隐蔽性增强版
+### v1.0.3（2026-08-24）稳定性与隐蔽性增强版
 本版本聚焦注入稳定性与隐蔽性（供反作弊研究/测试参考）：
 
 - **新增 `module_hide` 模块隐藏**：被注入的 DLL 会从目标进程 PEB 的 InLoadOrder / InMemoryOrder / InInitializationOrder 三条加载链表中摘除，并清空名字字符串，使 `GetModuleHandle`、模块枚举等无法再发现该模块——对标主流注入脚本的常见收尾手段。已接入 `core.dll` 与 `jar_loader`。
@@ -213,5 +213,3 @@ FlashDllInjector/
 ## 许可
 
 本项目使用 **Apache-2.0** 开源协议。Copyright © 2026 FastNow Studio。
-
-> **请勿用于任何非法用途**：未经授权向他人电脑/游戏注入 DLL 属于违法行为。请遵守当地法律与游戏服务条款。

@@ -7,9 +7,9 @@ fn main() {
             res.set_icon("icon.ico");
         }
         res.set_language(0x0804);
-        res.set("FileDescription", "FlashDllInjector - Windows DLL Injection Tool");
-        res.set("ProductName", "FlashDllInjector");
-        res.set("OriginalFilename", "FlashDllInjector.exe");
+        res.set("FileDescription", "WeaveRift - Minecraft DLL Injection Tool");
+        res.set("ProductName", "WeaveRift");
+        res.set("OriginalFilename", "WeaveRift.exe");
         res.set("CompanyName", "FastNow Studio");
         res.set("LegalCopyright", "Copyright (c) 2026 FastNow Studio");
         res.compile().expect("Failed to compile Windows resources");
