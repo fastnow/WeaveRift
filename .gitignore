@@ -13,4 +13,5 @@
 Thumbs.db
 Desktop.ini
 .DS_Store
-agent/build
+agent/build/
+agent/libs/
