@@ -1,6 +1,6 @@
 [package]
 name = "jar_loader"
-version = "1.0.3"
+version = "1.0.4"
 edition = "2021"
 
 [lib]
@@ -17,6 +17,7 @@ windows = { version = "0.58", features = [
 ] }
 jni = "0.21"
 lazy_static = "1.4"
+jvmti-bindings = "2"
 
 [profile.release]
 opt-level = "z"

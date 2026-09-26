@@ -23,10 +23,18 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: . -> target
+          workspaces: |
+            . -> target
+            jar_loader -> target
           cache-on-failure: "true"
 
       - name: Read version.json metadata
@@ -34,20 +42,15 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Test-Path version.json)) { throw "version.json not found at repo root" }
-
           $json = Get-Content version.json -Raw | ConvertFrom-Json
-
           $ver = [string]$json.version
           if (-not $ver) { throw "version.json is missing required field: version" }
           Add-Content $env:GITHUB_OUTPUT "version=$ver"
-
           $title = [string]$json.title
           if (-not $title) { $title = "v$ver" }
           Add-Content $env:GITHUB_OUTPUT "title=$title"
-
           $desc = [string]$json.description
           Set-Content -Path RELEASE_BODY.md -Value $desc -Encoding UTF8
-
           $rel = [string]$json.release
           if ($rel -match '^(true|1|yes)$') {
             Add-Content $env:GITHUB_OUTPUT "release=true"
@@ -55,26 +58,25 @@ jobs:
             Add-Content $env:GITHUB_OUTPUT "release=false"
           }
 
-          Write-Host "version  = $ver"
-          Write-Host "title    = $title"
-          Write-Host "release  = $rel"
-          Write-Host "--- description ---"
-          Write-Host $desc
-
       - name: Build WeaveRift.exe
         run: cargo build --release
 
-      - name: Build WeaveRift/core.dll
-        working-directory: WeaveRift
+      - name: Build jar_loader.dll
+        working-directory: jar_loader
         run: cargo build --release
+
+      - name: Build weaverift-agent.jar
+        working-directory: agent
+        shell: cmd
+        run: build.bat
 
       - name: Assemble release folder
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release\WeaveRift | Out-Null
           Copy-Item target\release\WeaveRift.exe release\ -Force
-          if (Test-Path icon.ico) { Copy-Item icon.ico release\ -Force }
-          Copy-Item WeaveRift\target\release\core.dll release\WeaveRift\ -Force
+          Copy-Item jar_loader\target\release\jar_loader.dll release\WeaveRift\ -Force
+          Copy-Item agent\build\weaverift-agent-1.0.0.jar release\WeaveRift\ -Force
           Write-Host "=== release contents ==="
           Get-ChildItem -Recurse release | Select-Object FullName, Length
 
@@ -82,7 +84,6 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -Path release\* -DestinationPath release.zip -Force
-          Write-Host "=== release.zip ==="
           Get-Item release.zip | Select-Object FullName, Length
 
       - name: Create GitHub Release

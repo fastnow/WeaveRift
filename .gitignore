@@ -1,6 +1,7 @@
 **/target/
 **/.cargo/
 **/testdll/
+**/test_api/
 **/release/
 *.zip
 .idea/
@@ -12,3 +13,4 @@
 Thumbs.db
 Desktop.ini
 .DS_Store
+agent/build

@@ -1,215 +1,138 @@
-# WeaveRift：一针入隙，万物可织
+# WeaveRift
 
-**WeaveRift** 是一个面向 **Windows + Minecraft（Java 版）** 的双模注入框架 —— **Classic Mode（DLL 注入）** 与 **Weave Mode（Java Agent 字节码编织）**。
+面向 **Windows + Minecraft（Java 版）** 的注入框架，支持原版 / Forge / Fabric，通过 JVMTI 在运行时修改已加载的类字节码，配合 OpenGL 实现游戏内渲染。
 
-启动游戏 → 运行工具 → 选中进程 → 选择模式 → 注入。无需配置，即开即用。
+> **声明**：本工具仅限学习、调试、研究等合法场景。请只对**你自己拥有或有权操作**的进程使用；未经授权注入他人程序属违法行为，由使用者自行承担全部责任。
 
-> **声明**：本工具仅限**学习、调试、研究**等合法场景，请对**你自己拥有或有权操作**的进程使用。未经授权注入他人程序属于违法行为，由使用者自行承担一切责任。
+## 核心特性
 
----
+- **零启动参数**：不需要修改 Minecraft 的 JVM 启动参数
+- **运行时字节码修改**：通过 JVMTI `RedefineClasses` 替换已加载的类，不受 `Instrumentation` Attach 模式限制
+- **跨版本**：换 SRG 映射文件即可适配不同 Minecraft 版本
+- **跨加载器**：原版 / Forge / Fabric 共用同一套 SRG 映射
+- **OpenGL 渲染**：直接画在游戏画布上，不是外挂窗口
+- **模块隐藏**：被注入 DLL 从 PEB 三条加载链摘除（`module_hide`）
+- **可扩展**：社区可往 `RiftRender` 里加任意 UI / ESP / HUD 模块
 
-## 它能做什么？
+## 架构概览
 
-- 自动扫描当前正在运行的 **Minecraft（Java 进程 javaw / java）**
-- 自动过滤掉浏览器等无关进程（不会把 Chrome / Edge 当作目标）
-- 把你自己写的 **DLL 文件** 注入到选中的游戏进程里
-- 内置 3 种注入方式，按需选择
-- 附带一个可选的「**WeaveRift 开场动画覆盖层**」（`core.dll`），注入后会在游戏窗口上播放一段类似电影厂牌的开场动画
+WeaveRift.exe (Rust)
+    │ 1. 写共享内存：JAR 路径
+    │ 2. LoadLibraryW 注入 jar_loader.dll
+    ▼
+jar_loader.dll (Rust)
+    │ 3. 读共享内存，从 JAR 路径推导 SRG 路径
+    │ 4. 设置系统属性 weaverift.srg / weaverift.dll
+    │ 5. Attach API 加载 weaverift-agent.jar
+    ▼
+weaverift-agent.jar (Java)
+    │ 6. 解析 SRG 映射表
+    │ 7. 反射读游戏数据
+    │ 8. 读 bib.class 原始字节码 → ASM 修改
+    │ 9. 调 NativeBridge.redefineClass() → JNI
+    ▼
+jar_loader.dll 的 redefineClass
+    │ 10. JVMTI RedefineClasses 替换已加载的类
+    ▼
+游戏 render 方法末尾插入 RiftRender.onRender()
+    ▼
+RiftRender 用 OpenGL 在游戏画布上绘制
 
----
+## 快速上手
 
-## 功能特性
+### 方式一：自动等待（推荐）
 
-| 特性 | 说明 |
-|------|------|
-| 智能进程识别 | 只显示 Java 进程，自动排除浏览器等无关进程 |
-| 三种注入方式 | `LoadLibraryW` / `Reflective` / `ManualMap` |
-| 开场动画覆盖层 | 注入 `WeaveRift/core.dll` 可在游戏画面播放 "WeaveRift" 电影式片头 |
-| 交互式菜单 | 中文 + 图标，全程键盘选择即可操作 |
-| 自动日志 | 运行日志写入 `%TEMP%\WeaveRift.log` |
-| 自动判断位数 | 注入前检测目标进程是 32 位还是 64 位 |
+1. 以管理员身份运行 `WeaveRift.exe`
+2. 选 `📦 Select Agent JAR` → 选 `release/WeaveRift/weaverift-agent-1.0.0.jar`
+3. 选 `⏳ Auto-Wait & Inject`
+4. **看到 "Waiting for Minecraft..." 后再启动 Minecraft**
 
----
+### 方式二：先启动游戏
 
-## 技术信息
-
-- 语言：**Rust**（2021 edition）
-- 目标平台：**Windows**
-- 授权协议：**Apache-2.0**
-- 当前版本：**v1.0.3**
-
-### 依赖库（编译时自动下载）
-`windows` · `sysinfo` · `rfd` · `inquire` · `anyhow` · `thiserror` · `chrono` · `winres`
-
----
+1. 先启动 Minecraft，进到主菜单
+2. 运行 `WeaveRift.exe`，选 `🎯 Select Target Process` 选中 `javaw.exe`
+3. 选 Agent JAR，然后选 `🚀 Inject Now`
 
 ## 目录结构
 
-```
 WeaveRift/
-├── src/
-│   ├── main.rs           # 主程序（交互菜单）
-│   ├── lib.rs            # 库入口
-│   ├── process_finder.rs # 进程查找 / 过滤
-│   ├── injector/         # 三种注入方式的实现
-│   │   ├── loadlibrary.rs  # LoadLibraryW 注入
-│   │   ├── reflective.rs   # Reflective 反射注入
-│   │   ├── manualmap.rs    # ManualMap 手动映射
-│   │   ├── pe_util.rs      # PE 文件解析
-│   │   └── mod.rs          # 注入入口与公共类型
-│   ├── logger.rs         # 日志
-│   └── error.rs          # 错误类型
-├── WeaveRift/                  # 覆盖层 core.dll（电影开场动画）
-├── jar_loader/           # JNI 相关辅助库（可选）
-├── module_hide/          # PEB 模块隐藏（被注入 DLL 自隐藏）
-├── package.bat           # 一键编译打包脚本
-├── build.rs              # 编译时写入图标/版本信息
-├── icon.ico              # 程序图标
+├── src/                      # 主程序（Rust）
+│   ├── main.rs               # 交互菜单 + CLI 入口
+│   ├── ipc.rs                # 共享内存（传 JAR 路径）
+│   ├── process_finder.rs     # 进程扫描
+│   ├── logger.rs             # 日志
+│   └── injector/             # DLL 注入实现
+├── jar_loader/               # jar_loader.dll（Rust + JVMTI）
+│   ├── src/lib.rs
+│   └── Cargo.toml
+├── agent/                    # weaverift-agent.jar（Java）
+│   ├── src/main/java/com/fastnow/weaverift/
+│   │   ├── WeaveRiftAgent.java   # agentmain 入口
+│   │   ├── NativeBridge.java     # JNI 声明
+│   │   └── render/RiftRender.java # OpenGL 渲染
+│   ├── libs/                 # 编译依赖 JAR
+│   │   ├── asm-9.7.jar
+│   │   ├── asm-commons-9.7.jar
+│   │   └── lwjgl-2.9.3.jar
+│   ├── build.bat
+│   └── manifest.txt
+├── module_hide/              # PEB 断链（Rust lib）
+├── release/                  # 打包输出
+│   ├── WeaveRift.exe
+│   └── WeaveRift/
+│       ├── jar_loader.dll
+│       ├── weaverift-agent-1.0.0.jar
+│       └── obf2srg.srg       # SRG 映射文件（需要手动下载）
+├── package.bat
 └── Cargo.toml
-```
 
----
+## 用户需要手动准备的依赖
 
-## 如何获取
+| 依赖 | 来源 | 放置位置 | 用途 |
+|---|---|---|---|
+| `obf2srg.srg` | 从 [kettingpowered/MinecraftMappings](https://github.com/kettingpowered/MinecraftMappings) 的 `mappings` 分支下载对应版本的 `obf2srg.srg` | `release/WeaveRift/obf2srg.srg` | SRG 映射表，用于查混淆名 |
+| `asm-9.7.jar` | 本项目 `agent/libs/` 目录自带 | — | 字节码修改 |
+| `asm-commons-9.7.jar` | 本项目 `agent/libs/` 目录自带 | — | 字节码修改（工具类） |
+| `lwjgl-2.9.3.jar` | 本项目 `agent/libs/` 目录自带 | — | 编译期链接 OpenGL（运行时由游戏自带） |
 
-### 方式一：直接使用打包好的版本（推荐）
-1. 让开发者/发布方给你 **release** 文件夹，里面应该有：
-   - `WeaveRift.exe`
-   - `icon.ico`
-   - `WeaveRift/core.dll`
-2. **把整个文件夹放在一起**，不要单独挪动 exe，否则找不到 `WeaveRift/core.dll`。
-3. 跳转到下方「🚀 小白使用教程」。
+> **为什么 `asm` 和 `lwjgl` 已经在 `agent/libs/` 里？**
+> 为了让用户可以离线编译 Agent。`build.bat` 会自动把 ASM 打进 Agent JAR，运行时不再依赖外部 ASM。
 
-### 方式二：自己编译
-需要先安装：
-- **[Rust](https://www.rust-lang.org/tools/install)**（必须）
-- **Windows 10 / 11**（必须是 Windows，本工具不跨平台）
+> **提示**：`mappings` 分支体积很大（约 1.43 GB），请只下载对应版本目录下的单个 `obf2srg.srg` 文件，不要克隆整个分支。
 
-**一键编译打包**：直接双击 `package.bat`，它会自动：
-1. 清理旧编译产物
-2. 编译 Release 版主程序
-3. 编译 `WeaveRift/core.dll` 覆盖层
-4. 把所有文件放到 **`release/`** 文件夹里
+## SRG 映射文件说明
 
-完成后打开 `release` 文件夹即可使用。
+SRG（Searge）是 Forge 生态的标准中间名。游戏运行时使用 SRG 名而不是 MCP 名，所以反射代码必须用 SRG 名对应的混淆名。
 
-> 也可以手动编译主程序：
-> ```
-> cargo build --release
-> ```
-> 生成的文件在 `target\release\WeaveRift.exe`。
+本项目**只支持原版 + Forge**，不需要 Intermediary（Fabric）。所以只需要下载 `obf2srg.srg` 一个文件。
 
----
+| 文件 | 用途 |
+|---|---|
+| `obf2srg.srg` | 混淆名 ↔ SRG 名，Agent 用它查每个字段/方法的真实名字 |
 
-## 草履虫都看得懂的使用教程
+不需要下载 `obf2mcp.srg`、`srg2mcp.srg`、`obf2spigot.srg` 等文件——那些是给开发工具和 Spigot 服务端用的，与运行时反射无关。
 
-### 第 1 步：准备 DLL
-请准备一个**你自己编译的 DLL 文件**（必须是为 Windows 编译的 `.dll`）。
-- 用什么语言写都可以，只要能生成 Windows DLL 即可（C/C++、Rust 等）。
-- 打包好的 `WeaveRift/core.dll` 是覆盖层动画，不是必须的；如果你只是测试，可以直接注入它看效果。
+## 注意事项
 
-### 第 2 步：以管理员身份运行工具
-**重要！** 找到 `WeaveRift.exe`，**右键 → 以管理员身份运行**。
-> 因为要向别的进程写内存，必须拥有管理员权限，否则会报「OpenProcess 失败 / 权限不足」。
-
-### 第 3 步：先启动 Minecraft
-先正常打开你的 Minecraft（Java 版）游戏，让游戏进程运行起来，然后再回到这个工具窗口。
-
-### 第 4 步：选择目标进程
-在菜单里选择 **`🎯 Select Target Process`**：
-- 如果只找到一个 Java 进程 → 会自动选中。
-- 如果有多个 → 会列出，用方向键选好按回车。
-- 工具会自动过滤掉浏览器等无关进程，你只需要找 `javaw.exe` 或带游戏标题的那一项。
-
-### 第 5 步：选择注入方式
-选择 **`💉 Select Inject Method`**，三种方式的区别见下表：
-
-| 方式 | 说明 | 稳定性 | 隐蔽性 | 适用 |
-|------|------|:------:|:------:|------|
-| `LoadLibraryW` | 最标准、最简单的注入方式（推荐） | ⭐⭐⭐ | ⭐ | 日常使用，最不容易出错 |
-| `Reflective` | DLL 自己把自己映射进内存，不需要 DLL 落盘 | ⭐⭐ | ⭐⭐ | DLL 导出了 `ReflectiveLoader` 函数时 |
-| `ManualMap` | 注入器手动把所有 PE 段写进内存 | ⭐ | ⭐⭐⭐ | 追求隐蔽、不想在目标进程里留下 LoadLibrary 痕迹时 |
-
-> 小白请优先选 **`LoadLibraryW — Simple & Stable`**。
-
-### 第 6 步：添加 DLL
-选择 **`📁 Add DLL(s)`**，在弹出的文件窗口里选中你的 DLL 文件。
-- 可以一次选多个。
-- 用 **`🗑 Remove DLL`** 删掉某个，用 **`🧹 Clear DLL List`** 清空。
-
-### 第 7 步：执行注入
-选择 **`🚀 Execute Injection`**，工具会先显示目标位数（64/32），然后询问 **Execute?**，回车确认。
-- 如果一切正常，会看到类似 `✅ All injected successfully.` 的提示。
-- 如果 `WeaveRift/core.dll` 存在，会先自动注入覆盖层动画。
-
-### 第 8 步：退出
-选择 **`👋 Exit`** 退出程序。
-
----
-
-## 常见问题与注意事项
-
-### 权限问题
-- **必须以管理员身份运行**。普通权限下会报 `OpenProcess` 失败或权限不足。
-- 如果游戏是用管理员权限启动的，工具也必须是管理员，否则无法注入。
-
-### 位数匹配（很关键）
-- **64 位进程 → 必须注入 64 位 DLL**
-- **32 位进程 → 必须注入 32 位 DLL**
-- 位数不匹配会失败（LoadLibraryW 报 `arch mismatch`；Reflective 报 `Not 64-bit`）。
-- 游戏大多是 64 位，如果你的 DLL 是 32 位编译的，要重新编译成 64 位。
-
-### 杀毒软件误报
-- DLL 注入、手动映射、反检测这类操作会被**几乎所有杀毒软件标记**为风险程序。
-- 如果被杀毒软件拦截或误删，请**把它加入白名单 / 信任区**。这通常是误报，但仍请自行判断来源是否可靠。
-
-### 日志在哪里
-- 日志自动保存在 `%TEMP%\WeaveRift.log`。
-- 报错时打开这个文件，把内容发给开发者更便于排查。
-- `%TEMP%` 通常在 `C:\Users\你的用户名\AppData\Local\Temp`。
-
-### 反作弊 / 反作弊服务器
-- 在带**反作弊系统**的服务器（如 Hypixel 等大型服务器）或某些平台环境中，注入 DLL 属于作弊行为，**会触发封号**。
-- **请只在单机、自建服务器或你自己的测试环境中使用**。
-
-
-### 三种注入方式的坑
-- **Reflective**：要求你的 DLL 里有一个导出函数叫 `ReflectiveLoader`，否则会报「ReflectiveLoader export not found」。
-- **ManualMap**：最隐蔽但也最容易出问题（不经过系统的 LoadLibrary，DLL 里的某些依赖可能无法正确加载），稳定性最低。
-- 不熟悉时，**永远优先用 LoadLibraryW**。
-
-### 小技巧
-- 注入前先确认游戏已经**完全进入主界面**（窗口标题已变为游戏名），这样进程和窗口更稳定。
-- 一次注入多个 DLL 时，若某个失败，其它成功的不受影响，日志里会分别列出成功与失败项。
-
----
+- **必须以管理员身份运行** `WeaveRift.exe`
+- **JVM 必须允许 self-attach**：启动参数加 `-Djdk.attach.allowAttachSelf=true`
+- **杀软误报**：注入 / JVMTI 操作会被杀软标记，请自行判断来源并加入信任区
+- **反作弊**：在带反作弊的服务器注入属作弊，会触发封号。**只在单机、自建服务器或你自己的测试环境使用**
+- 日志在 `%TEMP%\WeaveRift.log`，Agent 日志在 Minecraft 的 `latest.log`
 
 ## 更新日志
 
-### v1.0.3（2026-08-24）稳定性与隐蔽性增强版
-本版本聚焦注入稳定性与隐蔽性（供反作弊研究/测试参考）：
+### v1.0.4（JVMTI 渲染闭环版本）
 
-- **新增 `module_hide` 模块隐藏**：被注入的 DLL 会从目标进程 PEB 的 InLoadOrder / InMemoryOrder / InInitializationOrder 三条加载链表中摘除，并清空名字字符串，使 `GetModuleHandle`、模块枚举等无法再发现该模块——对标主流注入脚本的常见收尾手段。已接入 `core.dll` 与 `jar_loader`。
-- **重写 `jar_loader` 的 JNI 代码**：按 `jni 0.21` 正确 API 重写，修复编译与链接问题（`JNI_GetCreatedJavaVMs` 改为从 `jvm.dll` 动态解析），使其可正常构建并打进发布包。
-- **明确仅支持 64 位**：`check_dll_architecture` 现在对 32 位 DLL 或 32 位目标进程直接报错，消除「UI 放行、底层却报 Not 64-bit」的自相矛盾。
-- **ManualMap 节区保护位映射**：按 PE `Characteristics` 正确映射为 `PAGE_EXECUTE_READ` / `PAGE_READWRITE` / `PAGE_NOACCESS` 等。
-- **Reflective 重定位缺失**：注入前检测 `delta`，非零时调用重定位修复逻辑，避免基址不匹配导致崩溃。
-- **32 位 PE 误解析**：检查 `OptionalHeader.Magic`，遇到 32 位 DLL 时明确报错返回，避免越界读取。
-- **GetProcAddress ordinal 传参**：改用 `MAKEINTRESOURCEA` 语义，避免小序号被当作内存地址解引用。
-- **窗口标题获取废代码**：重写为带状态的回调，找到目标 PID 的窗口后提取标题并立即终止枚举。
-- **进程选择 PID 解析错位**：改用索引精确匹配，杜绝进程名/标题含空格时的解析歧义。
-- **版本号统一**：日志版本号改用 `env!("CARGO_PKG_VERSION")`，与 `Cargo.toml` 自动同步。
-
----
-
-## 参与开发 / 二次开发
-
-- 本工具用 **Rust** 编写，改动后运行 `cargo build --release` 重新编译。
-- 注入逻辑集中在 `src/injector/`，新增注入方式可在 `src/injector/mod.rs` 的 `InjectMethod` 里扩展。
-- 进程筛选逻辑在 `src/process_finder.rs`。
-
----
+- **核心突破**：改用 JVMTI `RedefineClasses` 替换已加载的类，彻底解决 Attach 模式无法 retransform 的问题
+- 新增 `agent/render/RiftRender.java`：OpenGL 渲染入口
+- 新增 `agent/NativeBridge.java`：JNI 桥接，Java 调 JVMTI
+- 新增 `jar_loader/src/lib.rs` 中的 `Java_com_fastnow_weaverift_NativeBridge_redefineClass` 导出
+- 新增 `jvmti-bindings` 依赖，用于调用 JVMTI API
+- 移除 `RiftTransformer.java`（不再需要 `ClassFileTransformer`）
+- Agent 启动时自动从 JAR 路径推导 SRG / DLL 路径，无需硬编码
+- 支持原版 + Forge，放弃 Fabric（避免 Intermediary 双映射维护）
 
 ## 许可
 
-本项目使用 **Apache-2.0** 开源协议。Copyright © 2026 FastNow Studio。
+Apache-2.0 | Copyright © 2026 FastNow Studio

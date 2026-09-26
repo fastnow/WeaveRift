@@ -1,9 +1,9 @@
 // src/main.rs
 use clap::Parser;
-use inquire::{Select, Confirm, Text};
+use inquire::{Select, Confirm};
 use std::path::PathBuf;
 use std::process;
-use std::io::Write;
+use std::time::Duration;
 
 use WeaveRift::injector::{inject, is_process_64bit, InjectMethod};
 use WeaveRift::process_finder;
@@ -14,17 +14,11 @@ use WeaveRift::ipc;
 #[derive(Parser)]
 #[command(name = "WeaveRift")]
 #[command(author = "FastNow Studio")]
-#[command(version = "1.0.3")]
+#[command(version = "1.0.2")]
 #[command(about = "Weave through the rift.", long_about = None)]
 struct Cli {
-    #[arg(short, long, value_parser = ["classic", "weave"])]
-    mode: Option<String>,
-
     #[arg(short, long)]
     pid: Option<u32>,
-
-    #[arg(long)]
-    dll: Option<PathBuf>,
 
     #[arg(long)]
     agent: Option<PathBuf>,
@@ -33,20 +27,14 @@ struct Cli {
 // ─── 全局应用状态 ──────────────────────────────────────────────────────────
 struct AppState {
     pid: Option<u32>,
-    method: InjectMethod,
-    dlls: Vec<PathBuf>,
-    agent_path: Option<PathBuf>,
-    mode: String, // "classic" 或 "weave"
+    agent_jar: Option<PathBuf>,
 }
 
 impl AppState {
     fn new() -> Self {
         Self {
             pid: None,
-            method: InjectMethod::LoadLibrary,
-            dlls: Vec::new(),
-            agent_path: None,
-            mode: "classic".to_string(),
+            agent_jar: None,
         }
     }
 }
@@ -55,60 +43,42 @@ impl AppState {
 fn print_banner() {
     println!(
         r#"
-╔═══════════════════════════════════════════════════════════════════╗
-║                                                                   ║
-║   ██╗    ██╗███████╗ █████╗ ██╗   ██╗███████╗██████╗ ██╗███████╗████████╗
-║   ██║    ██║██╔════╝██╔══██╗██║   ██║██╔════╝██╔══██╗██║██╔════╝╚══██╔══╝
-║   ██║ █╗ ██║█████╗  ███████║██║   ██║█████╗  ██████╔╝██║█████╗     ██║   
-║   ██║███╗██║██╔══╝  ██╔══██║╚██╗ ██╔╝██╔══╝  ██╔══██╗██║██╔══╝     ██║   
-║   ╚███╔███╔╝███████╗██║  ██║ ╚████╔╝ ███████╗██║  ██║██║██║        ██║   
-║    ╚══╝╚══╝ ╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═╝╚═╝╚═╝        ╚═╝   
-║                                                                   ║
-║            Weave through the rift.                               ║
-║            Version 1.0.3                                         ║
-╚═══════════════════════════════════════════════════════════════════╝
+╔═════════════════════════════════════════════════════════════════════════════╗
+║                                                                             ║
+║   ██╗    ██╗███████╗ █████╗ ██╗   ██╗███████╗██████╗ ██╗███████╗████████╗   ║
+║   ██║    ██║██╔════╝██╔══██╗██║   ██║██╔════╝██╔══██╗██║██╔════╝╚══██╔══╝   ║
+║   ██║ █╗ ██║█████╗  ███████║██║   ██║█████╗  ██████╔╝██║█████╗     ██║      ║
+║   ██║███╗██║██╔══╝  ██╔══██║╚██╗ ██╔╝██╔══╝  ██╔══██╗██║██╔══╝     ██║      ║
+║   ╚███╔███╔╝███████╗██║  ██║ ╚████╔╝ ███████╗██║  ██║██║██║        ██║      ║
+║    ╚══╝╚══╝ ╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═╝╚═╝╚═╝        ╚═╝      ║
+║                                                                             ║
+║                           Weave through the rift.                           ║
+║                                Version 1.0.2                                ║
+╚═════════════════════════════════════════════════════════════════════════════╝
 "#
     );
 }
 
 fn print_status(state: &AppState) {
-    let mode_label = if state.mode == "weave" { "🧵 Weave" } else { "💉 Classic" };
-    let target = state.pid.map_or("Not selected".to_string(), |p| format!("PID {}", p));
-    let dll_count = state.dlls.len();
-    let agent = state.agent_path.as_ref().map_or("None".to_string(), |p| p.display().to_string());
+    let target = state.pid.map_or("(not selected)".to_string(), |p| format!("PID {}", p));
+    let agent = state.agent_jar.as_ref().map_or("(not selected)".to_string(), |p| {
+        p.file_name().unwrap_or_default().to_string_lossy().to_string()
+    });
 
     println!("\n┌──────────────────────────────────────────────────────┐");
-    println!("│  Mode   : {}", mode_label);
     println!("│  Target : {}", target);
-    if state.mode == "classic" {
-        println!("│  Method : {}", state.method);
-        println!("│  DLLs   : {} file(s)", dll_count);
-        for (i, d) in state.dlls.iter().enumerate() {
-            println!("│           {}. {}", i+1, d.display());
-        }
-    } else {
-        println!("│  Agent  : {}", agent);
-    }
+    println!("│  Agent  : {}", agent);
     println!("└──────────────────────────────────────────────────────┘\n");
 }
 
-fn print_progress(current: usize, total: usize, msg: &str) {
-    let pct = (current * 100) / total;
-    let filled = (pct * 20) / 100;
-    let bar: String = std::iter::repeat('█').take(filled)
-        .chain(std::iter::repeat('░').take(20 - filled)).collect();
-    print!("\r   [{}] {:>3}% - {}", bar, pct, msg);
-    std::io::stdout().flush().ok();
-}
-
-// ─── 核心功能函数 ──────────────────────────────────────────────────────────
+// ─── 核心功能 ──────────────────────────────────────────────────────────────
 
 /// 扫描并选择目标进程
 fn select_process() -> Option<u32> {
     println!("🔄 Scanning for Minecraft processes...");
     let procs = process_finder::find_minecraft_processes();
     if procs.is_empty() {
-        println!("❌ No Minecraft process found.");
+        println!("❌ No Minecraft process found. Please start the game first.");
         return None;
     }
 
@@ -126,180 +96,127 @@ fn select_process() -> Option<u32> {
     Some(procs[idx].pid)
 }
 
-/// 切换注入方式（仅 Classic 模式）
-fn select_inject_method() -> InjectMethod {
-    let opts = vec![
-        "LoadLibraryW — Simple & Stable (recommended)",
-        "Reflective — DLL self-maps (needs ReflectiveLoader export)",
-        "ManualMap — Injector maps everything (most stealth)",
-    ];
-    let sel = Select::new("Select injection method:", opts.clone())
-        .prompt()
-        .unwrap_or_else(|_| opts[0]);
-    match sel {
-        "LoadLibraryW — Simple & Stable (recommended)" => InjectMethod::LoadLibrary,
-        "Reflective — DLL self-maps (needs ReflectiveLoader export)" => InjectMethod::Reflective,
-        "ManualMap — Injector maps everything (most stealth)" => InjectMethod::ManualMap,
-        _ => InjectMethod::LoadLibrary,
-    }
-}
-
-/// 添加 DLL（Classic 模式）
-fn add_dlls(state: &mut AppState) {
-    let files = rfd::FileDialog::new()
-        .add_filter("DLL", &["dll"])
-        .pick_files();
-    if let Some(paths) = files {
-        let mut count = 0;
-        for p in paths {
-            if !state.dlls.contains(&p) {
-                state.dlls.push(p);
-                count += 1;
-            }
-        }
-        println!("✅ Added {} DLL(s)", count);
-    }
-}
-
-/// 移除 DLL
-fn remove_dll(state: &mut AppState) {
-    if state.dlls.is_empty() {
-        println!("❌ No DLLs to remove.");
-        return;
-    }
-    let items: Vec<String> = state.dlls.iter().map(|p| p.display().to_string()).collect();
-    let sel = Select::new("Select DLL to remove:", items.clone()).prompt().ok();
-    if let Some(sel_str) = sel {
-        if let Some(idx) = items.iter().position(|s| s == &sel_str) {
-            let removed = state.dlls.remove(idx);
-            println!("✅ Removed {}", removed.display());
-        }
-    }
-}
-
-/// 切换模式（Classic <-> Weave）
-fn toggle_mode(state: &mut AppState) {
-    state.mode = if state.mode == "classic" { "weave".to_string() } else { "classic".to_string() };
-    println!("✅ Switched to {} mode", state.mode);
-}
-
-/// 选择 Agent JAR（Weave 模式）
+/// 选择 Agent JAR
 fn select_agent(state: &mut AppState) {
     let file = rfd::FileDialog::new()
-        .add_filter("JAR", &["jar"])
+        .add_filter("Java Agent", &["jar"])
         .pick_file();
     if let Some(path) = file {
-        state.agent_path = Some(path);
-        println!("✅ Agent selected: {}", state.agent_path.as_ref().unwrap().display());
+        state.agent_jar = Some(path);
+        println!("✅ Agent selected: {}", state.agent_jar.as_ref().unwrap().display());
     } else {
         println!("❌ No file selected.");
     }
 }
 
-// ─── 执行注入 ──────────────────────────────────────────────────────────────
-
-fn execute_injections(pid: u32, dlls: &[PathBuf], method: InjectMethod) -> Result<(), String> {
-    let total = dlls.len();
-    let mut failed = Vec::new();
-
-    for (idx, dll) in dlls.iter().enumerate() {
-        print_progress(idx, total, &format!("Injecting {}...", dll.file_name().unwrap_or_default().to_string_lossy()));
-        match inject(pid, dll, method) {
-            Ok(res) => {
-                print_progress(idx + 1, total, "Done");
-                println!("\n   ✅ {} @ 0x{:X}", res.method, res.base_address);
-            }
-            Err(e) => {
-                print_progress(idx + 1, total, "Failed");
-                println!("\n   ❌ {}", e);
-                failed.push((dll.display().to_string(), e));
-            }
-        }
-    }
-
-    if failed.is_empty() {
-        println!("\n✅ All injections succeeded.");
-    } else {
-        println!("\n⚠️  {} injection(s) failed:", failed.len());
-        for (name, err) in failed {
-            println!("   - {}: {}", name, err);
-        }
-    }
-    Ok(())
-}
-
-fn run_classic_mode(state: &AppState) -> Result<(), String> {
+/// 执行 Weave 注入（已有 PID）
+fn run_weave(state: &AppState) -> Result<(), String> {
     let pid = state.pid.ok_or("No target process selected.")?;
-    let dlls = &state.dlls;
-    if dlls.is_empty() {
-        return Err("No DLLs selected.".to_string());
-    }
+    let jar_path = state.agent_jar.as_ref().ok_or("No Agent JAR selected.")?;
 
-    // 检查位数
-    for dll in dlls {
-        if let Err(e) = WeaveRift::injector::pe_util::check_dll_architecture(dll, pid) {
-            return Err(format!("DLL '{}' architecture mismatch: {}", dll.display(), e));
-        }
-    }
-
-    // 注入动画 core.dll（统一放在 WeaveRift 子目录）
-    let exe_dir = std::env::current_exe().map_err(|e| e.to_string())?.parent().unwrap().to_path_buf();
-    let core_path = exe_dir.join("WeaveRift").join("core.dll");
-    if core_path.exists() {
-        println!("🎨 Injecting overlay core (WeaveRift animation)...");
-        if let Err(e) = inject(pid, &core_path, InjectMethod::LoadLibrary) {
-            println!("⚠️ Overlay injection failed: {}", e);
-        } else {
-            println!("✅ Overlay core injected.");
-        }
-    } else {
-        println!("ℹ️ core.dll not found, skipping animation.");
-    }
-
-    execute_injections(pid, dlls, state.method)?;
-    Ok(())
-}
-
-fn run_weave_mode(state: &AppState) -> Result<(), String> {
-    let pid = state.pid.ok_or("No target process selected.")?;
-    let agent_path = state.agent_path.as_ref().ok_or("No Agent JAR selected.")?;
-
-    // 检查目标进程是否 64 位
     if !is_process_64bit(pid).map_err(|e| e.to_string())? {
         return Err("Weave mode requires a 64-bit Java process.".to_string());
     }
 
-    // 注入动画 core.dll
-    let exe_dir = std::env::current_exe().map_err(|e| e.to_string())?.parent().unwrap().to_path_buf();
-    let core_path = exe_dir.join("WeaveRift").join("core.dll");
-    if core_path.exists() {
-        println!("🎨 Injecting overlay core (WeaveRift animation)...");
-        if let Err(e) = inject(pid, &core_path, InjectMethod::LoadLibrary) {
-            println!("⚠️ Overlay injection failed: {}", e);
-        } else {
-            println!("✅ Overlay core injected.");
-        }
-    } else {
-        println!("ℹ️ core.dll not found, skipping animation.");
-    }
+    let exe_dir = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .parent()
+        .ok_or("Cannot find exe directory")?
+        .to_path_buf();
 
-    // 通过共享内存传递 Agent 路径
-    ipc::write_agent_path(agent_path).map_err(|e| format!("IPC write failed: {}", e))?;
+    // ─── 写共享内存 ───────────────────────────────
+    println!("📝 Writing Agent path to shared memory...");
+    ipc::write_jar_path(jar_path, pid)
+        .map_err(|e| format!("IPC write failed: {}", e))?;
+    println!("✅ Agent path written.");
 
-    // 注入 loader DLL（从 WeaveRift 子目录）
+    // ─── 注入 jar_loader.dll ──────────────────────
     let loader_dll = exe_dir.join("WeaveRift").join("jar_loader.dll");
     if !loader_dll.exists() {
-        return Err("jar_loader.dll not found in release/WeaveRift folder.".to_string());
+        return Err(format!(
+            "jar_loader.dll not found at: {}",
+            loader_dll.display()
+        ));
     }
 
-    println!("🧵 Loading jar_loader.dll...");
+    println!("📦 Injecting jar_loader.dll...");
     let res = inject(pid, &loader_dll, InjectMethod::LoadLibrary)
         .map_err(|e| format!("Failed to inject jar_loader.dll: {}", e))?;
     println!("✅ jar_loader.dll injected @ 0x{:X}", res.base_address);
 
-    println!("⏳ Waiting for Agent to attach...");
-    std::thread::sleep(std::time::Duration::from_secs(2));
-    println!("✅ Weave injection completed (assuming success).");
+    println!("⏳ Waiting for Agent to load...");
+    std::thread::sleep(Duration::from_secs(2));
+    println!("✅ Weave injection completed.");
+
+    Ok(())
+}
+
+/// ★ 自动等待进程 + 立即注入
+///
+/// 不要求用户先启动 Minecraft。程序会轮询 javaw.exe，
+/// 一发现就立刻注入，赶在 Minecraft 类加载之前把 transformer 装好。
+fn auto_wait_and_inject(state: &AppState) -> Result<(), String> {
+    let jar_path = state.agent_jar.as_ref().ok_or("No Agent JAR selected.")?;
+
+    // 检查 SRG 文件在不在（Agent 会去读）
+    let srg_path = jar_path.parent()
+        .ok_or("JAR has no parent dir")?
+        .join("obf2srg.srg");
+    if !srg_path.exists() {
+        return Err(format!("obf2srg.srg not found at: {}", srg_path.display()));
+    }
+
+    let exe_dir = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .parent()
+        .ok_or("Cannot find exe directory")?
+        .to_path_buf();
+
+    let loader_dll = exe_dir.join("WeaveRift").join("jar_loader.dll");
+    if !loader_dll.exists() {
+        return Err(format!("jar_loader.dll not found at: {}", loader_dll.display()));
+    }
+
+    println!();
+    println!("════════════════════════════════════════════════════════");
+    println!("  ⏳ Waiting for Minecraft (javaw.exe)...");
+    println!("  📌 Please start Minecraft NOW (PCL / HMCL / official)");
+    println!("  ⛔ Press Ctrl+C to cancel");
+    println!("════════════════════════════════════════════════════════");
+    println!();
+
+    // 轮询等待进程出现
+    let start = std::time::Instant::now();
+    let pid = loop {
+        let procs = process_finder::find_minecraft_processes();
+        if let Some(p) = procs.first() {
+            println!();
+            println!("✅ Found Minecraft: PID {} ({})", p.pid, p.name);
+            break p.pid;
+        }
+        if start.elapsed().as_secs() > 300 {
+            return Err("Timeout: no Minecraft process found in 5 minutes.".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+
+    // ★ 立即注入（不等窗口出现）
+    println!("📝 Writing Agent path to shared memory...");
+    ipc::write_jar_path(jar_path, pid)
+        .map_err(|e| format!("IPC write failed: {}", e))?;
+    println!("✅ Agent path written.");
+
+    println!("📦 Injecting jar_loader.dll...");
+    let res = inject(pid, &loader_dll, InjectMethod::LoadLibrary)
+        .map_err(|e| format!("Failed to inject: {}", e))?;
+    println!("✅ jar_loader.dll injected @ 0x{:X}", res.base_address);
+
+    println!();
+    println!("════════════════════════════════════════════════════════");
+    println!("  ✅ Injection complete!");
+    println!("  📌 Watch the Minecraft log for [WeaveRift] messages");
+    println!("════════════════════════════════════════════════════════");
+    println!();
 
     Ok(())
 }
@@ -309,97 +226,84 @@ fn run_weave_mode(state: &AppState) -> Result<(), String> {
 fn interactive_loop() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = AppState::new();
 
+    // 启动时自动扫一次
+    println!("🔄 Auto-scanning for Minecraft...");
+    if let Some(pid) = select_process() {
+        state.pid = Some(pid);
+    }
+
     loop {
         print_banner();
         print_status(&state);
 
-        let mut options = vec![
-            "🎯 Select Target Process",
-            "🔄 Switch Mode (Classic/Weave)",
-        ];
+        let mut options = Vec::new();
 
-        if state.mode == "classic" {
-            options.extend_from_slice(&[
-                "💉 Select Injection Method",
-                "📁 Add DLL(s)",
-                "🗑  Remove DLL",
-                "🧹 Clear DLL List",
-            ]);
+        // 进程
+        if state.pid.is_none() {
+            options.push("🎯 Select Target Process".to_string());
         } else {
-            options.push("📦 Select Agent JAR");
+            options.push("🎯 Change Target Process".to_string());
         }
 
-        options.push("🚀 Execute Injection");
-        options.push("👋 Exit");
+        // Agent
+        if state.agent_jar.is_none() {
+            options.push("📦 Select Agent JAR".to_string());
+        } else {
+            options.push("📦 Change Agent JAR".to_string());
+        }
 
-        let choice = Select::new("Select action:", options).prompt()?;
+        // ★ 两种注入模式
+        if state.agent_jar.is_some() {
+            options.push("🚀 Inject Now (require game already running)".to_string());
+            options.push("⏳ Auto-Wait & Inject (start this BEFORE Minecraft)".to_string());
+        }
 
-        match choice {
-            "🎯 Select Target Process" => {
+        options.push("👋 Exit".to_string());
+
+        let choice = Select::new("Select action:", options.clone()).prompt()?;
+
+        match &choice[..] {
+            "🎯 Select Target Process" | "🎯 Change Target Process" => {
                 if let Some(pid) = select_process() {
                     state.pid = Some(pid);
                 }
             }
-            "🔄 Switch Mode (Classic/Weave)" => {
-                toggle_mode(&mut state);
-                // 清空无关数据
-                if state.mode == "classic" {
-                    state.agent_path = None;
-                } else {
-                    state.dlls.clear();
-                }
+            "📦 Select Agent JAR" | "📦 Change Agent JAR" => {
+                select_agent(&mut state);
             }
-            "💉 Select Injection Method" => {
-                if state.mode == "classic" {
-                    state.method = select_inject_method();
-                }
-            }
-            "📁 Add DLL(s)" => {
-                if state.mode == "classic" {
-                    add_dlls(&mut state);
-                }
-            }
-            "🗑  Remove DLL" => {
-                if state.mode == "classic" {
-                    remove_dll(&mut state);
-                }
-            }
-            "🧹 Clear DLL List" => {
-                if state.mode == "classic" {
-                    state.dlls.clear();
-                    println!("✅ DLL list cleared.");
-                }
-            }
-            "📦 Select Agent JAR" => {
-                if state.mode == "weave" {
-                    select_agent(&mut state);
-                }
-            }
-            "🚀 Execute Injection" => {
+            "🚀 Inject Now (require game already running)" => {
                 if state.pid.is_none() {
                     println!("❌ No target process selected.");
                     continue;
                 }
-                // 确认
-                let confirm_msg = match state.mode.as_str() {
-                    "classic" => format!("Inject {} DLL(s) via [{}]?", state.dlls.len(), state.method),
-                    "weave" => "Load Java Agent via Weave Mode?".to_string(),
-                    _ => unreachable!(),
-                };
+                let confirm_msg = format!(
+                    "Inject Agent '{}' into PID {}?",
+                    state.agent_jar.as_ref().unwrap().file_name()
+                        .unwrap_or_default().to_string_lossy(),
+                    state.pid.unwrap()
+                );
                 if !Confirm::new(&confirm_msg).with_default(true).prompt()? {
                     continue;
                 }
 
-                // 执行
-                let result = if state.mode == "classic" {
-                    run_classic_mode(&state)
-                } else {
-                    run_weave_mode(&state)
-                };
-
-                match result {
+                match run_weave(&state) {
                     Ok(_) => println!("✅ Injection completed."),
                     Err(e) => println!("❌ Injection failed: {}", e),
+                }
+
+                println!("\nPress Enter to continue...");
+                let mut buf = String::new();
+                std::io::stdin().read_line(&mut buf)?;
+            }
+            "⏳ Auto-Wait & Inject (start this BEFORE Minecraft)" => {
+                let confirm_msg = "This will poll for Minecraft. Start Minecraft AFTER confirming.\nProceed?";
+                if !Confirm::new(confirm_msg).with_default(true).prompt()? {
+                    continue;
+                }
+
+                match auto_wait_and_inject(&state) {
+                    Ok(_) => println!("✅ Auto-injection completed."),
+                    Err(e) => println!("❌ Auto-injection failed: {}", e),
                 }
 
                 println!("\nPress Enter to continue...");
@@ -410,11 +314,10 @@ fn interactive_loop() -> Result<(), Box<dyn std::error::Error>> {
                 println!("👋 Goodbye!");
                 break;
             }
-            _ => unreachable!(),
+            _ => {}
         }
 
-        // 短暂停顿让用户看清反馈
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::thread::sleep(Duration::from_millis(300));
     }
     Ok(())
 }
@@ -427,46 +330,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
 
-    // 如果提供了任何 CLI 参数，进入 CLI 模式
-    if cli.mode.is_some() || cli.pid.is_some() || cli.dll.is_some() || cli.agent.is_some() {
-        let mode = cli.mode.as_deref().unwrap_or("classic");
-        let pid = cli.pid.ok_or("--pid is required in CLI mode")?;
+    // CLI 模式
+    if cli.pid.is_some() || cli.agent.is_some() {
+        let mut state = AppState::new();
+        if let Some(pid) = cli.pid {
+            state.pid = Some(pid);
+        }
+        if let Some(agent) = cli.agent {
+            state.agent_jar = Some(agent);
+        }
 
-        match mode {
-            "classic" => {
-                let dlls = cli.dll.map(|p| vec![p]).unwrap_or_default();
-                if dlls.is_empty() {
-                    eprintln!("❌ --dll is required for classic mode");
-                    process::exit(1);
-                }
-                let mut state = AppState::new();
-                state.pid = Some(pid);
-                state.dlls = dlls;
-                state.method = InjectMethod::LoadLibrary; // 默认
-
-                if let Err(e) = run_classic_mode(&state) {
-                    eprintln!("❌ {}", e);
-                    process::exit(1);
-                }
+        if state.agent_jar.is_some() && state.pid.is_some() {
+            if let Err(e) = run_weave(&state) {
+                eprintln!("❌ {}", e);
+                process::exit(1);
             }
-            "weave" => {
-                let agent = cli.agent.ok_or("--agent is required for weave mode")?;
-                let mut state = AppState::new();
-                state.pid = Some(pid);
-                state.agent_path = Some(agent);
-                state.mode = "weave".to_string();
-
-                if let Err(e) = run_weave_mode(&state) {
-                    eprintln!("❌ {}", e);
-                    process::exit(1);
-                }
+        } else if state.agent_jar.is_some() {
+            // 只传了 agent，自动等待
+            if let Err(e) = auto_wait_and_inject(&state) {
+                eprintln!("❌ {}", e);
+                process::exit(1);
             }
-            _ => unreachable!(),
+        } else {
+            eprintln!("❌ --agent is required");
+            process::exit(1);
         }
         return Ok(());
     }
 
-    // 否则进入交互式菜单
     interactive_loop()?;
     Ok(())
 }

@@ -32,9 +32,10 @@ dependencies = [
 
 [[package]]
 name = "jar_loader"
-version = "1.0.3"
+version = "1.0.2"
 dependencies = [
  "jni",
+ "jvmti-bindings",
  "lazy_static",
  "module_hide",
  "windows",
@@ -85,6 +86,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "jvmti-bindings"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e35a49e28b0f470ac943c3539889cce31f3553690655dbf4eebc2d1b5aa0209b"
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -105,6 +112,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "module_hide"
 version = "1.0.3"
+dependencies = [
+ "windows",
+]
 
 [[package]]
 name = "proc-macro2"

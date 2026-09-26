@@ -1,0 +1,4 @@
+Agent-Class: com.fastnow.weaverift.WeaveRiftAgent
+Premain-Class: com.fastnow.weaverift.WeaveRiftAgent
+Can-Redefine-Classes: true
+Can-Retransform-Classes: true

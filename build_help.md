@@ -1,164 +1,109 @@
-# 构建脚本使用帮助
+# WeaveRift 构建指南
 
-本文档帮助你理解并上手本项目的**两个构建脚本**：
+## 一、前置依赖
 
-| 脚本 | 位置 | 作用 | 谁用 |
-|------|------|------|------|
-| 一键打包脚本 | `package.bat` | 本机编译并生成 `release/` 文件夹 | 想在自己电脑上出包的人 |
-| 自动发布工作流 | `.github/workflows/auto-release.yml` | GitHub 云端自动编译 + 打包 + 发布 Release | 想每次更新自动发版的人 |
+### 编译期依赖
 
-下面分别讲解。
+| 依赖 | 用途 | 来源 |
+|---|---|---|
+| Rust 1.75+ | 编译 WeaveRift.exe / jar_loader.dll / module_hide | [rust-lang.org](https://www.rust-lang.org/tools/install) |
+| JDK 17 或更高 | 编译 weaverift-agent.jar | [Adoptium](https://adoptium.net/) 或本地已有 JDK |
 
----
+### Agent 编译所需的 JAR（已自带）
 
-## 一、本地一键打包：`package.bat`
+以下三个文件已经放在 `agent/libs/`，**无需手动下载**：
 
-### 它是干什么的？
-双击运行后，它会在你本机自动完成：
-1. 清空旧的 `release` 文件夹
-2. 编译 **Release 版主程序**（`WeaveRift.exe`）
-3. 编译覆盖层 `WeaveRift/core.dll`
-4. 把 `exe`、`icon.ico`、`core.dll` 按正确目录结构放到 **`release/`** 文件夹里
+| 文件 | 用途 |
+|---|---|
+| `asm-9.7.jar` | 字节码修改 |
+| `asm-commons-9.7.jar` | ASM 工具类 |
+| `lwjgl-2.9.3.jar` | 编译期链接 OpenGL（运行时由游戏自带） |
 
-> `release/` 就是可以直接分发 / 压缩给别人使用的成品目录。
+> **注意**：如果你是从 GitHub Release 下载的预编译版本，那 `agent/libs/` 不会包含这三个文件。**只有从源码编译才需要它们**。
 
-### 使用前提（必须先装好）
-- **Rust**（必须）：去 <https://www.rust-lang.org/tools/install> 安装，装完会有 `cargo` 命令。
-- **Windows 系统**（本工具只支持 Windows）。
-- 在 **cmd 或 PowerShell** 中确认能运行 `cargo --version`，能输出版本号就说明装好了。
+### 运行时依赖（用户手动准备）
 
-### 怎么用
-最简单的方式：**双击 `package.bat`**。
-也可以打开终端，进入项目目录后运行：
+| 文件 | 来源 | 放置位置 |
+|---|---|---|
+| `obf2srg.srg` | [kettingpowered/MinecraftMappings](https://github.com/kettingpowered/MinecraftMappings) 仓库 → `mappings` 分支 → 对应版本目录 → `obf2srg.srg` | `release/WeaveRift/obf2srg.srg` |
 
-```bat
-package.bat
-```
+**示例**：你的目标版本是 1.12.2，就去下载 `1.12.2/obf2srg.srg`，放到 `release/WeaveRift/` 下。
 
-运行时会打印步骤进度，最后输出成品所在目录，并列出内容：
+> **提示**：`mappings` 分支体积很大（约 1.43 GB），请只下载对应版本目录下的单个 `obf2srg.srg` 文件，不要克隆整个分支。
 
-```
-================================================
-   Build Complete!
-================================================
-Output folder: ...\WeaveRift\release
-```
+## 二、本地一键构建
 
-### 运行过程失败怎么办？
-`package.bat` 里每一步都会检查 `errorlevel`，出错会暂停并提示。常见原因：
+双击运行项目根目录的 `package.bat`，它会自动完成：
 
-| 现象 | 原因 | 解决 |
-|------|------|------|
-| `[ERROR] cargo not found` | 没装 Rust 或没加入 PATH | 安装 Rust 并重开终端 |
-| `[ERROR] Build failed` | 代码编译报错 | 看终端里的编译错误信息，或 `cargo build --release` 单独排查 |
-| `[ERROR] Core build failed` | `WeaveRift` 覆盖层编译失败 | 进入 `WeaveRift` 目录单独 `cargo build --release` 排查 |
+1. 清理旧的 `release/` 目录
+2. `cargo build --release` → 生成 `WeaveRift.exe`
+3. 进入 `jar_loader/` → `cargo build --release` → 生成 `jar_loader.dll`
+4. 进入 `agent/` → 调 `build.bat` 编译 Java → 生成 `weaverift-agent-1.0.0.jar`
+5. 把产物按正确目录结构放到 `release/`
 
-> 你也可以手动编译主程序（等价于 `package.bat` 第 2 步）：
-> ```
-> cargo build --release
-> ```
-> 生成文件在 `target\release\WeaveRift.exe`。
+### 产物结构
 
----
-
-## 二、自动发布：GitHub Actions 工作流
-
-文件名：`.github/workflows/auto-release.yml`
-
-### 它是干什么的？
-当你把代码推送到 GitHub，且**最新一条提交信息包含 `[RELEASE]`** 时，云端会自动：
-1. 读取根目录 **`version.json`** 里的发布信息（`title` / `version` / `description` / `release`）
-2. 在 Windows 虚拟机上编译 `WeaveRift.exe` 和 `WeaveRift/core.dll`
-3. 打包成 **`release.zip`**
-4. 用 `version.json` 的信息创建 **GitHub Release**（附件是 `release.zip`）
-
-**你完全不用在自己电脑装 Rust**，只要改好 `version.json` 并 push 就行。
-
-### 📄 先认识 `version.json`（发布信息的唯一来源）
-
-发布时的**版本号、标题、说明、是否发布**全部由根目录的 `version.json` 控制。结构如下：
-
-```json
-{
-  "title": "WeaveRift v1.0.3",
-  "version": "1.0.3",
-  "description": "本版本主要更新：\n- 修复进程筛选问题\n- 新增功能",
-  "release": true
-}
-```
-
-字段说明：
-
-| 字段 | 是否必填 | 作用 |
-|------|:---:|------|
-| `title` | 可选 | Release 标题；缺省时自动用 `v<version>` |
-| `version` | **必填** | Release 的 tag / 版本号（会生成 tag `v2.3.0`）；缺省会直接报错 |
-| `description` | 可选 | Release 更新说明正文（支持 `\n` 换行） |
-| `release` | 可选 | **布尔开关**：`true` 才真正创建 Release，`false`/缺省则只编译打包、不发布 |
-
-### 触发与使用
-
-**步骤 1：更新 `version.json`**
-把 `version`、`title`、`description` 改成新版本的内容，并确认 `release` 为 `true`。
-
-**步骤 2：提交信息带 `[RELEASE]` 并推送**
-```bash
-git add version.json
-git commit -m "[RELEASE]"
-git push
-```
-
-**步骤 3（可选）：手动触发测试**
-- 打开 GitHub 仓库 → `Actions` → `Auto Release` → 右侧 **Run workflow** → 运行。
-
-### 产物结构（`release.zip` 内）
-```
-release.zip
-└── WeaveRift.exe   # 主程序
-├── icon.ico               # 图标（存在才打包）
+release/
+├── WeaveRift.exe
 └── WeaveRift/
-    └── core.dll           # 开场动画覆盖层
-```
+    ├── jar_loader.dll
+    └── weaverift-agent-1.0.0.jar
 
-### 工作流里发生了什么（逐步对照）
-1. `Checkout` — 拉取代码
-2. `Set up Rust` — 装 Rust 稳定版工具链
-3. `Rust cache` — 缓存编译产物，加速后续构建
-4. `Read version.json metadata` — 读取 `title`/`version`/`description`/`release`，把说明写入 `RELEASE_BODY.md`
-5. `Build WeaveRift.exe` — 编译主程序
-6. `Build WeaveRift/core.dll` — 编译覆盖层
-7. `Assemble release folder` — 组装 `release/` 目录
-8. `Compress to release.zip` — 用 `Compress-Archive` 压缩
-9. `Create GitHub Release` — **仅当 `release=true`** 时创建 Release 并上传 `release.zip`（标题、tag、说明都来自 `version.json`）
+> **别忘了**：编译完成后，把 `obf2srg.srg` 手动复制到 `release/WeaveRift/` 下。这是运行时依赖，不会被编译脚本自动放进。
 
-### 首次使用前要做的配置
-1. **把代码推到 GitHub**：本项目还没配置远程仓库，先关联：
-   ```bash
-   git remote add origin https://github.com/<你的用户名>/<仓库名>.git
-   git push -u origin main
-   ```
-2. **确认 Actions 权限**：仓库 `Settings → Actions → General → Workflow permissions`，勾选 **Read and write permissions**（工作流需要 `contents: write` 才能创建 Release，文件里已声明该权限）。
-3. **确认默认分支名**：工作流监听 `main` 和 `master`，如果你的分支不叫这两个，需要改文件第 12 行的 `branches`。
+## 三、手动构建各模块
 
-### 常见问题
+### 1. 主程序 WeaveRift.exe
+
+cd WeaveRift
+cargo build --release
+:: 产物: target/release/WeaveRift.exe
+
+### 2. jar_loader.dll
+
+cd jar_loader
+cargo build --release
+:: 产物: target/release/jar_loader.dll
+
+### 3. weaverift-agent.jar
+
+cd agent
+build.bat
+:: 产物: build/weaverift-agent-1.0.0.jar
+
+`build.bat` 做的事：
+
+1. 编译 Java 源文件（含 ASM / LWJGL 依赖）
+2. 解压 ASM 到临时目录
+3. 把 class 文件和 ASM 一起打包进 JAR
+4. 生成 `build/weaverift-agent-1.0.0.jar`
+
+## 四、GitHub Actions 自动发布
+
+文件：`.github/workflows/auto-release.yml`
+
+当最新提交信息包含 `[RELEASE]` 时，云端自动：
+
+1. 读 `version.json`
+2. 编译 `WeaveRift.exe` / `jar_loader.dll` / `weaverift-agent.jar`
+3. 打包成 `release.zip`
+4. 创建 GitHub Release
+
+### 触发方式
+
+git add version.json
+git commit -m "[RELEASE] v1.0.4"
+git push
+
+> **GitHub Actions 不会自动下载 `obf2srg.srg`**。用户下载 Release 后，需要自己去 kettingpowered 仓库下载对应版本的 `obf2srg.srg`，放到 `release/WeaveRift/` 下。
+
+## 五、常见问题
 
 | 现象 | 原因 | 解决 |
-|------|------|------|
-| 提交了 `[RELEASE]` 但没触发 | 不是最新一条提交，或分支不在 `main`/`master` | 让含 `[RELEASE]` 的提交成为本次 push 的最新一条；确认分支名 |
-| 工作流报 `version.json is missing required field: version` | `version.json` 里没有 `version` 字段 | 补上 `"version": "x.y.z"` |
-| 编译打包了但没发布 Release | `version.json` 的 `release` 不是 `true` | 把 `release` 改成 `true` 再 push |
-| 创建 Release 失败 / tag 重复 | 版本号已被用过 | 换一个新版本号 |
-| Release 标题/说明不对 | `version.json` 没改 | 先更新 `title` / `description` 再触发 |
-| 构建失败 | 代码编译报错 | 查看工作流日志里的 `Build` 步骤输出 |
-
----
-
-## 🔧 三、两者如何选
-
-| 你的需求 | 用哪个 |
-|----------|--------|
-| 本机快速出一份 `release/` 给人用 | `package.bat` |
-| 每次更新自动出正式 Release 发布到 GitHub | GitHub Actions 工作流 |
-| 想在自己电脑上调试编译报错 | 手动 `cargo build --release` |
-
-> 提示：本地调试编译用 `cargo build`（debug 快）；出正式包用 `cargo build --release` 或 `package.bat`（更小更快，已配置 `lto`、`strip`、`opt-level=z`）。
+|---|---|---|
+| `cargo not found` | Rust 没装或没加 PATH | 安装 Rust 并重开终端 |
+| `javac not found` | JDK 没装或没加 PATH | 安装 JDK 17+ |
+| `程序包 org.objectweb.asm 不存在` | ASM JAR 没放对位置 | 确认 `agent/libs/asm-9.7.jar` 存在 |
+| `程序包 org.lwjgl.opengl 不存在` | LWJGL JAR 缺失 | 确认 `agent/libs/lwjgl-2.9.3.jar` 存在 |
+| 运行时 `SRG path not set` | 未设置系统属性 | 检查 `jar_loader` 是否成功设了 `weaverift.srg` |
+| 运行时 `Class not found: bib` | SRG 文件版本不匹配 | 下载与目标 Minecraft 版本对应的 `obf2srg.srg` |
