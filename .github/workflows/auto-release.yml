@@ -16,7 +16,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -24,7 +24,7 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -58,27 +58,73 @@ jobs:
             Add-Content $env:GITHUB_OUTPUT "release=false"
           }
 
-      - name: Build WeaveRift.exe
-        run: cargo build --release
 
-      - name: Build jar_loader.dll
-        working-directory: jar_loader
+      - name: Build WeaveRift.exe
         run: cargo build --release
 
       - name: Build weaverift-agent.jar
         working-directory: agent
         shell: cmd
-        run: build.bat
+        run: call build.bat < nul
+
+      - name: Build jar_loader.dll
+        working-directory: jar_loader
+        run: cargo build --release
 
       - name: Assemble release folder
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path release\WeaveRift | Out-Null
+
           Copy-Item target\release\WeaveRift.exe release\ -Force
+
           Copy-Item jar_loader\target\release\jar_loader.dll release\WeaveRift\ -Force
-          Copy-Item agent\build\weaverift-agent-1.0.0.jar release\WeaveRift\ -Force
+
+          $jar = Get-ChildItem -Path agent\build -Filter 'weaverift-agent*.jar' -File |
+                 Select-Object -First 1
+          if (-not $jar) {
+            throw "weaverift-agent*.jar not found under agent\build"
+          }
+          Copy-Item $jar.FullName release\WeaveRift\weaverift-agent.jar -Force
+
+          if (Test-Path console.html) {
+            Copy-Item console.html release\WeaveRift\ -Force
+            Write-Host "console.html: from repo root"
+          } elseif (Test-Path jar_loader\console.html) {
+            Copy-Item jar_loader\console.html release\WeaveRift\ -Force
+            Write-Host "console.html: from jar_loader/"
+          } else {
+            Write-Host "::warning::console.html not found, built-in fallback will be used"
+          }
+
+          if (Test-Path obf2srg.srg) {
+            Copy-Item obf2srg.srg release\WeaveRift\ -Force
+            Write-Host "obf2srg.srg: bundled"
+          } else {
+            Write-Host "::warning::obf2srg.srg not bundled - users must download it themselves"
+          }
+
           Write-Host "=== release contents ==="
           Get-ChildItem -Recurse release | Select-Object FullName, Length
+
+      - name: Verify artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $required = @(
+            'release\WeaveRift.exe',
+            'release\WeaveRift\jar_loader.dll',
+            'release\WeaveRift\weaverift-agent.jar'
+          )
+          $missing = @()
+          foreach ($f in $required) {
+            if (-not (Test-Path $f)) { $missing += $f }
+          }
+          if ($missing.Count -gt 0) {
+            throw "missing required artifacts: $($missing -join ', ')"
+          }
+          Write-Host "All required artifacts present."
 
       - name: Compress to release.zip
         shell: pwsh
@@ -86,9 +132,16 @@ jobs:
           Compress-Archive -Path release\* -DestinationPath release.zip -Force
           Get-Item release.zip | Select-Object FullName, Length
 
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WeaveRift-${{ steps.meta.outputs.version }}
+          path: release.zip
+          if-no-files-found: error
+
       - name: Create GitHub Release
         if: steps.meta.outputs.release == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.meta.outputs.version }}
           name: ${{ steps.meta.outputs.title }}

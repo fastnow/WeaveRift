@@ -1,4 +1,5 @@
 // src/main.rs
+mod ipc;
 use clap::Parser;
 use inquire::{Select, Confirm};
 use std::path::PathBuf;
@@ -8,38 +9,40 @@ use std::time::Duration;
 use WeaveRift::injector::{inject, is_process_64bit, InjectMethod};
 use WeaveRift::process_finder;
 use WeaveRift::logger;
-use WeaveRift::ipc;
 
-// ─── CLI 参数 ─────────────────────────────────────────────────────────────
+// ─── CLI 参数 ─────────────────────────────────────
+
 #[derive(Parser)]
 #[command(name = "WeaveRift")]
 #[command(author = "FastNow Studio")]
-#[command(version = "1.0.2")]
+#[command(version = "2.0.0")]
 #[command(about = "Weave through the rift.", long_about = None)]
 struct Cli {
     #[arg(short, long)]
     pid: Option<u32>,
 
     #[arg(long)]
-    agent: Option<PathBuf>,
+    srg: Option<PathBuf>,
 }
 
-// ─── 全局应用状态 ──────────────────────────────────────────────────────────
+// ─── 全局状态 ─────────────────────────────────────
+
 struct AppState {
     pid: Option<u32>,
-    agent_jar: Option<PathBuf>,
+    srg_path: Option<PathBuf>,
 }
 
 impl AppState {
     fn new() -> Self {
         Self {
             pid: None,
-            agent_jar: None,
+            srg_path: None,
         }
     }
 }
 
-// ─── 辅助函数 ──────────────────────────────────────────────────────────────
+// ─── 辅助函数 ─────────────────────────────────────
+
 fn print_banner() {
     println!(
         r#"
@@ -53,311 +56,209 @@ fn print_banner() {
 ║    ╚══╝╚══╝ ╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═╝╚═╝╚═╝        ╚═╝      ║
 ║                                                                             ║
 ║                           Weave through the rift.                           ║
-║                                Version 1.0.2                                ║
+║                                Version 2.0.0                                ║
 ╚═════════════════════════════════════════════════════════════════════════════╝
 "#
     );
 }
 
 fn print_status(state: &AppState) {
-    let target = state.pid.map_or("(not selected)".to_string(), |p| format!("PID {}", p));
-    let agent = state.agent_jar.as_ref().map_or("(not selected)".to_string(), |p| {
-        p.file_name().unwrap_or_default().to_string_lossy().to_string()
-    });
+    let target = state
+        .pid
+        .map_or("(not selected)".to_string(), |p| format!("PID {}", p));
+    let srg = state
+        .srg_path
+        .as_ref()
+        .map_or("(auto-detect)".to_string(), |p| {
+            p.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        });
 
     println!("\n┌──────────────────────────────────────────────────────┐");
     println!("│  Target : {}", target);
-    println!("│  Agent  : {}", agent);
+    println!("│  SRG    : {}", srg);
     println!("└──────────────────────────────────────────────────────┘\n");
 }
 
-// ─── 核心功能 ──────────────────────────────────────────────────────────────
+// ─── 进程选择 ─────────────────────────────────────
 
-/// 扫描并选择目标进程
 fn select_process() -> Option<u32> {
-    println!("🔄 Scanning for Minecraft processes...");
-    let procs = process_finder::find_minecraft_processes();
+    println!("🔄 扫描 Minecraft 进程（只显示有窗口的）...");
+    let procs = process_finder::find_minecraft_windows();
     if procs.is_empty() {
-        println!("❌ No Minecraft process found. Please start the game first.");
+        println!("❌ 未找到有窗口的 Minecraft 进程。");
+        println!("   请确认游戏已进入主菜单或已进入世界。");
         return None;
     }
 
     if procs.len() == 1 {
         let p = &procs[0];
-        println!("✅ Auto-selected PID {} ({})", p.pid, p.name);
+        println!("✅ 自动选中 PID {} ({})", p.pid, p.title);
         return Some(p.pid);
     }
 
-    let items: Vec<String> = procs.iter()
-        .map(|p| format!("PID {:6}  {}  ({})", p.pid, p.name, p.title))
+    let items: Vec<String> = procs
+        .iter()
+        .map(|p| format!("PID {:6}  {}  [{}]", p.pid, p.name, p.title))
         .collect();
-    let sel = Select::new("Select target process:", items.clone()).prompt().ok()?;
+    let sel = Select::new("选择目标进程:", items.clone()).prompt().ok()?;
     let idx = items.iter().position(|s| s == &sel)?;
     Some(procs[idx].pid)
 }
 
-/// 选择 Agent JAR
-fn select_agent(state: &mut AppState) {
+// ─── SRG 选择 ─────────────────────────────────────
+
+fn select_srg(state: &mut AppState) {
     let file = rfd::FileDialog::new()
-        .add_filter("Java Agent", &["jar"])
+        .add_filter("SRG", &["srg"])
+        .set_title("选择 obf2srg.srg")
         .pick_file();
     if let Some(path) = file {
-        state.agent_jar = Some(path);
-        println!("✅ Agent selected: {}", state.agent_jar.as_ref().unwrap().display());
+        state.srg_path = Some(path.clone());
+        println!("✅ SRG: {}", path.display());
     } else {
-        println!("❌ No file selected.");
+        println!("❌ 未选择文件");
     }
 }
 
-/// 执行 Weave 注入（已有 PID）
-fn run_weave(state: &AppState) -> Result<(), String> {
-    let pid = state.pid.ok_or("No target process selected.")?;
-    let jar_path = state.agent_jar.as_ref().ok_or("No Agent JAR selected.")?;
+// ─── 注入 ─────────────────────────────────────────
+
+fn run_inject(state: &AppState) -> Result<(), String> {
+    let pid = state.pid.ok_or("未选择目标进程")?;
 
     if !is_process_64bit(pid).map_err(|e| e.to_string())? {
-        return Err("Weave mode requires a 64-bit Java process.".to_string());
+        return Err("目标进程不是 64 位".into());
     }
 
     let exe_dir = std::env::current_exe()
         .map_err(|e| e.to_string())?
         .parent()
-        .ok_or("Cannot find exe directory")?
+        .ok_or("找不到 exe 目录")?
         .to_path_buf();
 
-    // ─── 写共享内存 ───────────────────────────────
-    println!("📝 Writing Agent path to shared memory...");
-    ipc::write_jar_path(jar_path, pid)
-        .map_err(|e| format!("IPC write failed: {}", e))?;
-    println!("✅ Agent path written.");
+    let wr_dir = exe_dir.join("WeaveRift");
 
-    // ─── 注入 jar_loader.dll ──────────────────────
-    let loader_dll = exe_dir.join("WeaveRift").join("jar_loader.dll");
+    let loader_dll = wr_dir.join("jar_loader.dll");
     if !loader_dll.exists() {
-        return Err(format!(
-            "jar_loader.dll not found at: {}",
-            loader_dll.display()
-        ));
+        return Err(format!("找不到 jar_loader.dll: {}", loader_dll.display()));
     }
 
-    println!("📦 Injecting jar_loader.dll...");
-    let res = inject(pid, &loader_dll, InjectMethod::LoadLibrary)
-        .map_err(|e| format!("Failed to inject jar_loader.dll: {}", e))?;
-    println!("✅ jar_loader.dll injected @ 0x{:X}", res.base_address);
+    let agent_jar = wr_dir.join("weaverift-agent.jar");
+    if !agent_jar.exists() {
+        return Err(format!("找不到 weaverift-agent.jar: {}", agent_jar.display()));
+    }
 
-    println!("⏳ Waiting for Agent to load...");
-    std::thread::sleep(Duration::from_secs(2));
-    println!("✅ Weave injection completed.");
+    println!("📝 写共享内存...");
+    ipc::write_jar_path(&agent_jar, pid)
+        .map_err(|e| format!("IPC 写失败: {}", e))?;
+
+    // 注入 jar_loader.dll
+    println!("📦 注入 jar_loader.dll...");
+    let res = inject(pid, &loader_dll, InjectMethod::LoadLibrary)
+        .map_err(|e| format!("注入失败: {}", e))?;
+    println!("✅ jar_loader.dll @ 0x{:X}", res.base_address);
+
+    println!("⏳ 等待 agent 加载（jar_loader 自己会加载）...");
+    std::thread::sleep(Duration::from_secs(5));
+
+    println!("✅ 注入完成");
+    println!("   调试台见 %TEMP%\\WeaveRift\\debug-url.txt");
 
     Ok(())
 }
 
-/// ★ 自动等待进程 + 立即注入
-///
-/// 不要求用户先启动 Minecraft。程序会轮询 javaw.exe，
-/// 一发现就立刻注入，赶在 Minecraft 类加载之前把 transformer 装好。
-fn auto_wait_and_inject(state: &AppState) -> Result<(), String> {
-    let jar_path = state.agent_jar.as_ref().ok_or("No Agent JAR selected.")?;
 
-    // 检查 SRG 文件在不在（Agent 会去读）
-    let srg_path = jar_path.parent()
-        .ok_or("JAR has no parent dir")?
-        .join("obf2srg.srg");
-    if !srg_path.exists() {
-        return Err(format!("obf2srg.srg not found at: {}", srg_path.display()));
-    }
-
-    let exe_dir = std::env::current_exe()
-        .map_err(|e| e.to_string())?
-        .parent()
-        .ok_or("Cannot find exe directory")?
-        .to_path_buf();
-
-    let loader_dll = exe_dir.join("WeaveRift").join("jar_loader.dll");
-    if !loader_dll.exists() {
-        return Err(format!("jar_loader.dll not found at: {}", loader_dll.display()));
-    }
-
-    println!();
-    println!("════════════════════════════════════════════════════════");
-    println!("  ⏳ Waiting for Minecraft (javaw.exe)...");
-    println!("  📌 Please start Minecraft NOW (PCL / HMCL / official)");
-    println!("  ⛔ Press Ctrl+C to cancel");
-    println!("════════════════════════════════════════════════════════");
-    println!();
-
-    // 轮询等待进程出现
-    let start = std::time::Instant::now();
-    let pid = loop {
-        let procs = process_finder::find_minecraft_processes();
-        if let Some(p) = procs.first() {
-            println!();
-            println!("✅ Found Minecraft: PID {} ({})", p.pid, p.name);
-            break p.pid;
-        }
-        if start.elapsed().as_secs() > 300 {
-            return Err("Timeout: no Minecraft process found in 5 minutes.".to_string());
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    };
-
-    // ★ 立即注入（不等窗口出现）
-    println!("📝 Writing Agent path to shared memory...");
-    ipc::write_jar_path(jar_path, pid)
-        .map_err(|e| format!("IPC write failed: {}", e))?;
-    println!("✅ Agent path written.");
-
-    println!("📦 Injecting jar_loader.dll...");
-    let res = inject(pid, &loader_dll, InjectMethod::LoadLibrary)
-        .map_err(|e| format!("Failed to inject: {}", e))?;
-    println!("✅ jar_loader.dll injected @ 0x{:X}", res.base_address);
-
-    println!();
-    println!("════════════════════════════════════════════════════════");
-    println!("  ✅ Injection complete!");
-    println!("  📌 Watch the Minecraft log for [WeaveRift] messages");
-    println!("════════════════════════════════════════════════════════");
-    println!();
-
-    Ok(())
-}
-
-// ─── 主菜单 ──────────────────────────────────────────────────────────────
+// ─── 交互菜单 ─────────────────────────────────────
 
 fn interactive_loop() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = AppState::new();
-
-    // 启动时自动扫一次
-    println!("🔄 Auto-scanning for Minecraft...");
-    if let Some(pid) = select_process() {
-        state.pid = Some(pid);
-    }
 
     loop {
         print_banner();
         print_status(&state);
 
-        let mut options = Vec::new();
+        let mut options: Vec<String> = Vec::new();
 
-        // 进程
         if state.pid.is_none() {
-            options.push("🎯 Select Target Process".to_string());
+            options.push("🎯 选择目标进程".to_string());
         } else {
-            options.push("🎯 Change Target Process".to_string());
+            options.push("🎯 重新选择进程".to_string());
         }
 
-        // Agent
-        if state.agent_jar.is_none() {
-            options.push("📦 Select Agent JAR".to_string());
-        } else {
-            options.push("📦 Change Agent JAR".to_string());
+        options.push("📄 选择 SRG 文件（可选）".to_string());
+
+        if state.pid.is_some() {
+            options.push("🚀 注入".to_string());
         }
 
-        // ★ 两种注入模式
-        if state.agent_jar.is_some() {
-            options.push("🚀 Inject Now (require game already running)".to_string());
-            options.push("⏳ Auto-Wait & Inject (start this BEFORE Minecraft)".to_string());
-        }
+        options.push("👋 退出".to_string());
 
-        options.push("👋 Exit".to_string());
+        let choice = Select::new("选择操作:", options.clone()).prompt()?;
 
-        let choice = Select::new("Select action:", options.clone()).prompt()?;
-
-        match &choice[..] {
-            "🎯 Select Target Process" | "🎯 Change Target Process" => {
+        match choice.as_str() {
+            "🎯 选择目标进程" | "🎯 重新选择进程" => {
                 if let Some(pid) = select_process() {
                     state.pid = Some(pid);
                 }
             }
-            "📦 Select Agent JAR" | "📦 Change Agent JAR" => {
-                select_agent(&mut state);
+            "📄 选择 SRG 文件（可选）" => {
+                select_srg(&mut state);
             }
-            "🚀 Inject Now (require game already running)" => {
-                if state.pid.is_none() {
-                    println!("❌ No target process selected.");
-                    continue;
-                }
-                let confirm_msg = format!(
-                    "Inject Agent '{}' into PID {}?",
-                    state.agent_jar.as_ref().unwrap().file_name()
-                        .unwrap_or_default().to_string_lossy(),
+            "🚀 注入" => {
+                let confirm = format!(
+                    "注入到 PID {}？\n(确保 PCL 已加 -Djdk.attach.allowAttachSelf=true)",
                     state.pid.unwrap()
                 );
-                if !Confirm::new(&confirm_msg).with_default(true).prompt()? {
+                if !Confirm::new(&confirm).with_default(true).prompt()? {
                     continue;
                 }
 
-                match run_weave(&state) {
-                    Ok(_) => println!("✅ Injection completed."),
-                    Err(e) => println!("❌ Injection failed: {}", e),
+                match run_inject(&state) {
+                    Ok(_) => println!("\n✅ 完成"),
+                    Err(e) => println!("\n❌ 失败: {}", e),
                 }
 
-                println!("\nPress Enter to continue...");
+                println!("\n按回车继续...");
                 let mut buf = String::new();
                 std::io::stdin().read_line(&mut buf)?;
             }
-            "⏳ Auto-Wait & Inject (start this BEFORE Minecraft)" => {
-                let confirm_msg = "This will poll for Minecraft. Start Minecraft AFTER confirming.\nProceed?";
-                if !Confirm::new(confirm_msg).with_default(true).prompt()? {
-                    continue;
-                }
-
-                match auto_wait_and_inject(&state) {
-                    Ok(_) => println!("✅ Auto-injection completed."),
-                    Err(e) => println!("❌ Auto-injection failed: {}", e),
-                }
-
-                println!("\nPress Enter to continue...");
-                let mut buf = String::new();
-                std::io::stdin().read_line(&mut buf)?;
-            }
-            "👋 Exit" => {
-                println!("👋 Goodbye!");
+            "👋 退出" => {
+                println!("👋 再见");
                 break;
             }
             _ => {}
         }
 
-        std::thread::sleep(Duration::from_millis(300));
+        std::thread::sleep(Duration::from_millis(200));
     }
+
     Ok(())
 }
 
-// ─── 主入口 ──────────────────────────────────────────────────────────────
+// ─── 入口 ─────────────────────────────────────────
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     logger::init_logger().ok();
-    logger::info(&format!("WeaveRift v{} started", env!("CARGO_PKG_VERSION")));
+    logger::info(&format!("WeaveRift v{} 启动", env!("CARGO_PKG_VERSION")));
 
     let cli = Cli::parse();
 
     // CLI 模式
-    if cli.pid.is_some() || cli.agent.is_some() {
+    if cli.pid.is_some() {
         let mut state = AppState::new();
-        if let Some(pid) = cli.pid {
-            state.pid = Some(pid);
-        }
-        if let Some(agent) = cli.agent {
-            state.agent_jar = Some(agent);
-        }
+        state.pid = cli.pid;
+        state.srg_path = cli.srg;
 
-        if state.agent_jar.is_some() && state.pid.is_some() {
-            if let Err(e) = run_weave(&state) {
-                eprintln!("❌ {}", e);
-                process::exit(1);
-            }
-        } else if state.agent_jar.is_some() {
-            // 只传了 agent，自动等待
-            if let Err(e) = auto_wait_and_inject(&state) {
-                eprintln!("❌ {}", e);
-                process::exit(1);
-            }
-        } else {
-            eprintln!("❌ --agent is required");
+        if let Err(e) = run_inject(&state) {
+            eprintln!("❌ {}", e);
             process::exit(1);
         }
         return Ok(());
     }
 
+    // 交互模式
     interactive_loop()?;
     Ok(())
 }

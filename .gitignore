@@ -14,4 +14,6 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 agent/build/
-agent/libs/
+agent/.gradle/
+obf2srg.srg
+**/Cargo.lock/

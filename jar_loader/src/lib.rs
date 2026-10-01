@@ -1,18 +1,413 @@
+//! WeaveRift native loader —— v3
+
+mod gl_ctx;
+mod hud;
+mod http_debug;
+mod ipc;
+mod jni_bridge;
+mod logger;
+mod module_hide;
+mod state;
+
 use std::ffi::c_void;
-use std::mem;
-use std::ptr;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicPtr, Ordering};
-use windows::Win32::Foundation::*;
-use windows::Win32::System::Memory::*;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
+
+use windows::Win32::Foundation::{BOOL, HINSTANCE};
+use windows::Win32::Graphics::Gdi::HDC;
+use windows::Win32::Graphics::OpenGL::wglGetCurrentContext;
 use windows::Win32::System::LibraryLoader::{
     GetModuleHandleW, GetProcAddress, DisableThreadLibraryCalls,
 };
 use windows::core::{PCSTR, PCWSTR};
-use jni::objects::{JValue, JString, JByteArray};
-use jni::sys::{jint, jclass, jstring, jbyteArray};
-use jni::JavaVM;
-use jvmti_bindings::env::Jvmti;
+
+use minhook::MinHook;
+
+type SwapFn = unsafe extern "system" fn(HDC) -> BOOL;
+
+static ORIG_SWAP: AtomicIsize = AtomicIsize::new(0);
+static FRAME_HUD: AtomicU64 = AtomicU64::new(0);
+static FRAME_FPS: AtomicU64 = AtomicU64::new(0);
+static UNHOOK_REQ: AtomicBool = AtomicBool::new(false);
+static UNHOOKED: AtomicBool = AtomicBool::new(false);
+static SAMPLER: OnceLock<Mutex<jni_bridge::Sampler>> = OnceLock::new();
+static LAST_SNAP: OnceLock<Mutex<Option<jni_bridge::Snapshot>>> = OnceLock::new();
+static FPS: OnceLock<Mutex<f32>> = OnceLock::new();
+static FPS_T0: OnceLock<Mutex<Instant>> = OnceLock::new();
+
+fn sampler() -> &'static Mutex<jni_bridge::Sampler> {
+    SAMPLER.get_or_init(|| Mutex::new(jni_bridge::Sampler::new(20)))
+}
+fn last_snap() -> &'static Mutex<Option<jni_bridge::Snapshot>> {
+    LAST_SNAP.get_or_init(|| Mutex::new(None))
+}
+
+pub fn set_sample_hz(hz: u64) {
+    if let Ok(mut s) = sampler().lock() {
+        *s = jni_bridge::Sampler::new(hz as u32);
+    }
+}
+
+pub fn request_unhook() {
+    UNHOOK_REQ.store(true, Ordering::Relaxed);
+}
+
+// ───────────────────────── Hook ─────────────────────────
+
+unsafe extern "system" fn hooked_wgl_swap_buffers(hdc: HDC) -> BOOL {
+    let hud_frame = FRAME_HUD.fetch_add(1, Ordering::Relaxed);
+    let fps_frame = FRAME_FPS.fetch_add(1, Ordering::Relaxed);
+
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        let t0 = Instant::now();
+        tick(hdc, hud_frame);
+        let us = t0.elapsed().as_micros();
+        if us > 8000 {
+            logger::warn(&format!("本帧耗时 {}us（超 8ms 预算）", us));
+        }
+    }));
+
+    // fps 统计
+    {
+        let t0 = FPS_T0.get_or_init(|| Mutex::new(Instant::now()));
+        if let Ok(mut start) = t0.lock() {
+            let el = start.elapsed().as_secs_f32();
+            if el >= 1.0 {
+                let v = fps_frame as f32 / el;
+                if let Ok(mut f) = FPS.get_or_init(|| Mutex::new(0.0)).lock() {
+                    *f = v;
+                }
+                FRAME_FPS.store(0, Ordering::Relaxed);
+                *start = Instant::now();
+            }
+        }
+    }
+
+    if UNHOOK_REQ.load(Ordering::Relaxed) && !UNHOOKED.load(Ordering::Relaxed) {
+        if let Err(e) = MinHook::disable_all_hooks() {
+            logger::error(&format!("卸载 hook 失败: {:?}", e));
+        } else {
+            UNHOOKED.store(true, Ordering::Relaxed);
+            logger::info("已卸载 hook");
+        }
+    }
+
+    let p = ORIG_SWAP.load(Ordering::SeqCst);
+    if p == 0 {
+        return BOOL(0);
+    }
+    let orig: SwapFn = std::mem::transmute::<isize, SwapFn>(p);
+    orig(hdc)
+}
+
+fn fps() -> f32 {
+    FPS.get().and_then(|m| m.lock().ok()).map(|v| *v).unwrap_or(0.0)
+}
+
+// ─────────────────────── 状态机 ───────────────────────
+
+unsafe fn tick(hdc: HDC, frame: u64) {
+    if UNHOOKED.load(Ordering::Relaxed) {
+        return;
+    }
+
+    match state::current() {
+        state::BOOT => {
+            state::set(state::START_HTTP);
+        }
+
+        state::START_HTTP => {
+            http_debug::start();
+            state::set(state::WAIT_GL);
+        }
+
+        state::WAIT_GL => {
+            if wglGetCurrentContext().is_invalid() {
+                state::fail("无 GL context");
+                return;
+            }
+            logger::info("GL context 就绪");
+            state::set(state::FIND_VM);
+        }
+
+        state::FIND_VM => match jni_bridge::find_vm() {
+            Ok(()) => state::set(state::CREATE_CTX),
+            Err(e) => state::fail(&e),
+        },
+
+        state::CREATE_CTX => {
+            if let Err(e) = hud::load_gl() {
+                state::fail(&e);
+                return;
+            }
+            if let Err(e) = gl_ctx::create_shared(hdc) {
+                state::fail(&e);
+                return;
+            }
+            if gl_ctx::begin() {
+                if let Err(e) = hud::init_font(hdc) {
+                    logger::warn(&format!("字体初始化失败: {}", e));
+                }
+                gl_ctx::end();
+            }
+            state::set(state::LOAD_AGENT);
+        }
+
+        state::LOAD_AGENT => {
+            // ★ 自己加载 agent，不走 Attach API
+            match load_agent_via_classloader() {
+                Ok(()) => {
+                    logger::info("agent 已加载");
+                    state::set(state::WAIT_AGENT);
+                }
+                Err(e) => {
+                    logger::error(&format!("agent 加载失败: {}", e));
+                    state::set(state::FAILED);
+                }
+            }
+        }
+
+        state::WAIT_AGENT => {
+            if gl_ctx::hdc_changed(hdc) {
+                logger::info("HDC 变化，重建 GL context");
+                gl_ctx::destroy();
+                state::set(state::CREATE_CTX);
+                return;
+            }
+            // 时间驱动重试
+            if !state::can_retry() {
+                return;
+            }
+            match jni_bridge::read_snapshot() {
+                Some(s) => {
+                    if let Ok(mut g) = last_snap().lock() {
+                        *g = Some(s);
+                    }
+                    logger::info("agent 就绪，进入 Running");
+                    state::set(state::RUNNING);
+                }
+                None => state::fail("RiftBridge 不可见"),
+            }
+        }
+
+        state::RUNNING => {
+            if gl_ctx::hdc_changed(hdc) {
+                logger::info("HDC 变化，重建 GL context");
+                gl_ctx::destroy();
+                state::set(state::CREATE_CTX);
+                return;
+            }
+
+            if let Ok(mut sm) = sampler().lock() {
+                if let Some(s) = sm.poll() {
+                    if let Ok(mut g) = last_snap().lock() {
+                        *g = Some(s);
+                    }
+                }
+            }
+
+            if !http_debug::HUD_ON.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let (w, h) = gl_ctx::viewport_size(hdc);
+            let snap = last_snap().lock().ok().and_then(|g| *g);
+
+            if gl_ctx::begin() {
+                hud::draw(
+                    w,
+                    h,
+                    snap,
+                    fps(),
+                    frame,
+                    state::name(state::RUNNING),
+                    jni_bridge::has_vm(),
+                    gl_ctx::valid(),
+                );
+                if !gl_ctx::end() {
+                    logger::warn("还原游戏 context 失败");
+                }
+            }
+        }
+
+        _ => {}
+    }
+}
+
+// ─────────────────────── Agent 加载 ───────────────────────
+
+fn absolute_no_unc(p: &str) -> Result<PathBuf, String> {
+    let pb = PathBuf::from(p);
+    let abs = if pb.is_absolute() {
+        pb
+    } else {
+        std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(pb)
+    };
+    let mut clean = PathBuf::new();
+    for comp in abs.components() {
+        use std::path::Component;
+        match comp {
+            Component::ParentDir => {
+                clean.pop();
+            }
+            Component::CurDir => {}
+            other => clean.push(other.as_os_str()),
+        }
+    }
+    Ok(clean)
+}
+
+/// 用 URLClassLoader 加载 agent jar，反射调 WeaveRiftAgent.agentmain
+unsafe fn load_agent_via_classloader() -> Result<(), String> {
+    // 1. 从共享内存读 JAR 路径（WeaveRift.exe 写的）
+    let (jar_path, _mode) = read_shared_path().ok_or("找不到共享内存（WeaveRift.exe 没写？）")?;
+    let jar_abs = absolute_no_unc(&jar_path)?;
+
+    if !jar_abs.exists() {
+        return Err(format!("agent jar 不存在: {}", jar_abs.display()));
+    }
+
+    // 从 JAR 路径推 SRG 和 DLL
+    let parent = jar_abs.parent().ok_or("jar 没有父目录")?;
+    let srg_path = parent.join("obf2srg.srg");
+    let dll_path = parent.join("jar_loader.dll");
+
+    logger::info(&format!("加载 agent: {}", jar_abs.display()));
+    logger::info(&format!("SRG: {}", srg_path.display()));
+    logger::info(&format!("DLL: {}", dll_path.display()));
+
+    // 2. 拿 JNIEnv
+    let vm = jni_bridge::get_vm().ok_or("VM 未初始化")?;
+    let mut env = vm.get_env().map_err(|e| format!("get_env: {}", e))?;
+
+    // 3. 构造 file:/// URL
+    let jar_url = format!("file:///{}", jar_abs.to_string_lossy().replace('\\', "/"));
+    logger::debug(&format!("jar url: {}", jar_url));
+
+    // 4. new URL(urlStr)
+    let url_cls = env
+        .find_class("java/net/URL")
+        .map_err(|e| format!("find URL: {}", e))?;
+    let url_str = env.new_string(&jar_url).map_err(|e| format!("new_string: {}", e))?;
+    let url_obj = env
+        .new_object(&url_cls, "(Ljava/lang/String;)V", &[jni::objects::JValue::Object(&url_str)])
+        .map_err(|e| format!("new URL: {}", e))?;
+
+    // 5. URL[] 数组
+    let url_arr = env
+        .new_object_array(1, &url_cls, jni::objects::JObject::null())
+        .map_err(|e| format!("new URL[]: {}", e))?;
+    env.set_object_array_element(&url_arr, 0, &url_obj)
+        .map_err(|e| format!("set array: {}", e))?;
+
+    // 6. 拿 SystemClassLoader
+    let parent_loader = env
+        .call_static_method(
+            "java/lang/ClassLoader",
+            "getSystemClassLoader",
+            "()Ljava/lang/ClassLoader;",
+            &[],
+        )
+        .map_err(|e| format!("getSystemClassLoader: {}", e))?
+        .l()
+        .map_err(|_| "system loader null")?;
+
+    // 7. new URLClassLoader(URL[], parent)
+    let ucl_cls = env
+        .find_class("java/net/URLClassLoader")
+        .map_err(|e| format!("find URLClassLoader: {}", e))?;
+    let ucl_obj = env
+        .new_object(
+            &ucl_cls,
+            "([Ljava/net/URL;Ljava/lang/ClassLoader;)V",
+            &[
+                jni::objects::JValue::Object(&url_arr),
+                jni::objects::JValue::Object(&parent_loader),
+            ],
+        )
+        .map_err(|e| format!("new URLClassLoader: {}", e))?;
+
+    // 8. setContextClassLoader（让后续 NativeBridge/Class.forName 能命中 agent 的类）
+    let thread_cls = env
+        .find_class("java/lang/Thread")
+        .map_err(|e| format!("find Thread: {}", e))?;
+    let current_thread = env
+        .call_static_method(&thread_cls, "currentThread", "()Ljava/lang/Thread;", &[])
+        .map_err(|e| format!("currentThread: {}", e))?
+        .l()
+        .map_err(|_| "thread null")?;
+    env.call_method(
+        &current_thread,
+        "setContextClassLoader",
+        "(Ljava/lang/ClassLoader;)V",
+        &[jni::objects::JValue::Object(&ucl_obj)],
+    )
+    .map_err(|e| format!("setContextClassLoader: {}", e))?;
+
+    // 9. 加载 WeaveRiftAgent 类
+    let agent_cls_name = env
+        .new_string("com.fastnow.weaverift.WeaveRiftAgent")
+        .map_err(|e| format!("new_string agent: {}", e))?;
+    let agent_cls = env
+        .call_method(
+            &ucl_obj,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[jni::objects::JValue::Object(&agent_cls_name)],
+        )
+        .map_err(|e| format!("loadClass: {}", e))?
+        .l()
+        .map_err(|_| "agent class null")?;
+
+    // 10. 反射调 WeaveRiftAgent.agentmain(String, Instrumentation)
+    //     Instrumentation 传 null（我们不需要它）
+    let agent_cls_jclass = jni::objects::JClass::from(agent_cls);
+    let agentmain_mid = env
+        .get_static_method_id(
+            &agent_cls_jclass,
+            "agentmain",
+            "(Ljava/lang/String;Ljava/lang/instrument/Instrumentation;)V",
+        )
+        .map_err(|e| format!("get agentmain: {}", e))?;
+
+    // 参数：srg=...;dll=...
+    let options = format!(
+        "srg={};dll={}",
+        srg_path.to_string_lossy(),
+        dll_path.to_string_lossy()
+    );
+    logger::info(&format!("agent 参数: {}", options));
+
+    let options_jstr = env
+        .new_string(&options)
+        .map_err(|e| format!("new_string options: {}", e))?;
+
+    let null_inst = jni::objects::JObject::null();
+    let args: [jni::sys::jvalue; 2] = [
+        jni::objects::JValue::Object(&options_jstr).as_jni(),
+        jni::objects::JValue::Object(&null_inst).as_jni(),
+    ];
+
+    unsafe {
+        env.call_static_method_unchecked(
+            &agent_cls_jclass,
+            agentmain_mid,
+            jni::signature::ReturnType::Primitive(jni::signature::Primitive::Void),
+            &args,
+        )
+        .map_err(|e| format!("agentmain 调用失败: {}", e))?;
+    }
+
+    logger::info("WeaveRiftAgent.agentmain 已调用");
+    Ok(())
+}
+
+// ─────────────────── 共享内存 ───────────────────
 
 #[repr(C)]
 struct SharedPath {
@@ -25,29 +420,24 @@ struct SharedPath {
 const SHARED_NAME: &str = "Local\\WeaveRift.Path";
 const MAGIC: u32 = 0x57415645;
 
-static G_JVMTI: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-
-fn find_srg_path(jar_path: &str) -> Option<PathBuf> {
-    let jar = PathBuf::from(jar_path);
-    let dir = jar.parent()?.to_path_buf();
-    let candidates = [
-        dir.join("obf2srg.srg"),
-        dir.join("mappings").join("obf2srg.srg"),
-    ];
-    for c in &candidates {
-        if c.exists() { return Some(c.clone()); }
-    }
-    None
-}
-
 fn read_shared_path() -> Option<(String, u32)> {
+    use windows::Win32::System::Memory::{
+        OpenFileMappingW, MapViewOfFile, FILE_MAP_READ,
+    };
+    use windows::Win32::Foundation::{CloseHandle, BOOL};
+
     let name_wide: Vec<u16> = SHARED_NAME.encode_utf16().chain(Some(0)).collect();
     let handle = unsafe {
-        OpenFileMappingW(FILE_MAP_ALL_ACCESS.0, BOOL(0), PCWSTR(name_wide.as_ptr()))
+        OpenFileMappingW(FILE_MAP_READ.0, BOOL(0), PCWSTR(name_wide.as_ptr()))
     };
-    let h = match handle { Ok(h) => h, Err(_) => return None };
+    let h = match handle {
+        Ok(h) => h,
+        Err(_) => return None,
+    };
 
-    let view = unsafe { MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, mem::size_of::<SharedPath>()) };
+    let view = unsafe {
+        MapViewOfFile(h, FILE_MAP_READ, 0, 0, std::mem::size_of::<SharedPath>())
+    };
     if view.Value.is_null() {
         unsafe { let _ = CloseHandle(h); }
         return None;
@@ -55,7 +445,10 @@ fn read_shared_path() -> Option<(String, u32)> {
 
     let shared = view.Value as *const SharedPath;
     if unsafe { (*shared).magic } != MAGIC {
-        unsafe { let _ = UnmapViewOfFile(view); let _ = CloseHandle(h); }
+        unsafe {
+            let _ = windows::Win32::System::Memory::UnmapViewOfFile(view);
+            let _ = CloseHandle(h);
+        }
         return None;
     }
 
@@ -63,258 +456,70 @@ fn read_shared_path() -> Option<(String, u32)> {
     let path_buf = unsafe { (*shared).jar_path };
     let len = path_buf.iter().position(|&c| c == 0).unwrap_or(260);
     let path = String::from_utf16_lossy(&path_buf[..len]);
-    unsafe { let _ = UnmapViewOfFile(view); let _ = CloseHandle(h); }
+
+    unsafe {
+        let _ = windows::Win32::System::Memory::UnmapViewOfFile(view);
+        let _ = CloseHandle(h);
+    }
     Some((path, mode))
 }
 
-fn find_jvm() -> Result<*mut jni::sys::JavaVM, String> {
-    type JniGetCreatedVmsFn = unsafe extern "system" fn(
-        vm_buf: *mut *mut jni::sys::JavaVM,
-        buf_len: jint,
-        n_vms: *mut jint,
-    ) -> jint;
+// ─────────────────────── 安装 Hook ───────────────────────
 
-    let name: Vec<u16> = "jvm.dll\0".encode_utf16().collect();
-    let hmod = unsafe { GetModuleHandleW(PCWSTR(name.as_ptr())) }
-        .map_err(|_| "jvm.dll not loaded".to_string())?;
-    let fptr = unsafe { GetProcAddress(hmod, PCSTR("JNI_GetCreatedJavaVMs\0".as_ptr())) }
-        .ok_or("JNI_GetCreatedJavaVMs not found")?;
-    let get_vms: JniGetCreatedVmsFn = unsafe { mem::transmute(fptr) };
+unsafe fn install_hook() -> Result<(), String> {
+    let opengl32_name: Vec<u16> = "opengl32.dll\0".encode_utf16().collect();
+    let opengl32 = GetModuleHandleW(PCWSTR(opengl32_name.as_ptr()))
+        .map_err(|_| "opengl32.dll not loaded")?;
 
-    let mut vm_ptr: *mut jni::sys::JavaVM = ptr::null_mut();
-    let mut count: jint = 0;
-    if unsafe { get_vms(&mut vm_ptr, 1, &mut count) } != 0 || count == 0 {
-        return Err("No Java VM found".into());
-    }
-    Ok(vm_ptr)
-}
+    let target = GetProcAddress(opengl32, PCSTR("wglSwapBuffers\0".as_ptr()))
+        .ok_or("wglSwapBuffers not found")?;
 
-fn load_agent_via_attach(env: &mut jni::JNIEnv, jar_path: &str, srg_path: Option<&str>) -> Result<(), String> {
-    let abs_path = std::path::Path::new(jar_path);
-    let abs_path = if abs_path.is_absolute() { abs_path.to_path_buf() }
-        else { std::env::current_dir().map_err(|e| e.to_string())?.join(abs_path) };
-    let jar_str = abs_path.to_string_lossy().to_string();
+    let trampoline = MinHook::create_hook(
+        target as *mut c_void,
+        hooked_wgl_swap_buffers as *mut c_void,
+    )
+    .map_err(|e| format!("create_hook failed: {:?}", e))?;
 
-    let pid = std::process::id().to_string();
-    let vm_cls = env.find_class("com/sun/tools/attach/VirtualMachine")
-        .map_err(|e| format!("VirtualMachine not found: {}", e))?;
-    let pid_jstr = env.new_string(&pid).map_err(|e| e.to_string())?;
-    let vm_obj = env.call_static_method(&vm_cls, "attach",
-        "(Ljava/lang/String;)Lcom/sun/tools/attach/VirtualMachine;",
-        &[JValue::from(&pid_jstr)])
-        .map_err(|e| format!("attach failed: {}", e))?
-        .l().map_err(|_| "attach returned null")?;
+    MinHook::enable_all_hooks()
+        .map_err(|e| format!("enable_all_hooks failed: {:?}", e))?;
 
-    let sys_cls = env.find_class("java/lang/System").map_err(|e| e.to_string())?;
+    ORIG_SWAP.store(trampoline as isize, Ordering::SeqCst);
 
-    // ─── 设置 weaverift.srg ───────────────────
-    if let Some(srg) = srg_path {
-        let key = env.new_string("weaverift.srg").map_err(|e| e.to_string())?;
-        let val = env.new_string(srg).map_err(|e| e.to_string())?;
-        let _ = env.call_static_method(&sys_cls, "setProperty",
-            "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-            &[JValue::from(&key), JValue::from(&val)]);
-        println!("[WeaveRift] Set weaverift.srg = {}", srg);
-    }
-
-    // ─── 设置 weaverift.dll ────────────────────
-    let jar_pb = PathBuf::from(jar_path);
-    if let Some(dir) = jar_pb.parent() {
-        let dll_path = dir.join("jar_loader.dll");
-        if dll_path.exists() {
-            let dll_str = dll_path.to_string_lossy().to_string();
-            let key = env.new_string("weaverift.dll").map_err(|e| e.to_string())?;
-            let val = env.new_string(&dll_str).map_err(|e| e.to_string())?;
-            let _ = env.call_static_method(&sys_cls, "setProperty",
-                "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-                &[JValue::from(&key), JValue::from(&val)]);
-            println!("[WeaveRift] Set weaverift.dll = {}", dll_str);
-        } else {
-            println!("[WeaveRift] jar_loader.dll not found next to JAR: {}", dll_path.display());
-        }
-    }
-
-    let jar_jstr = env.new_string(&jar_str).map_err(|e| e.to_string())?;
-    env.call_method(&vm_obj, "loadAgent", "(Ljava/lang/String;)V",
-        &[JValue::from(&jar_jstr)]).map_err(|e| format!("loadAgent failed: {}", e))?;
-    let _ = env.call_method(&vm_obj, "detach", "()V", &[]);
-
-    println!("[WeaveRift] Agent loaded: {}", jar_str);
+    logger::info(&format!(
+        "wglSwapBuffers 已 hook (orig @ {:#x})",
+        trampoline as isize
+    ));
     Ok(())
 }
 
-fn worker_thread() {
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    let Some((path, mode)) = read_shared_path() else {
-        eprintln!("[WeaveRift] No shared data found");
-        return;
-    };
-    println!("[WeaveRift] Shared JAR: {}", path);
-
-    let srg_path = find_srg_path(&path);
-    let srg_str = srg_path.as_ref().map(|p| p.to_string_lossy().to_string());
-
-    let vm_ptr = match find_jvm() {
-        Ok(p) => p,
-        Err(e) => { eprintln!("[WeaveRift] {}", e); return }
-    };
-
-    let vm = unsafe { JavaVM::from_raw(vm_ptr) }.unwrap();
-    let mut env = match vm.attach_current_thread_as_daemon() {
-        Ok(e) => e,
-        Err(e) => { eprintln!("[WeaveRift] Attach failed: {}", e); return }
-    };
-
-    if mode == 0 {
-        if let Err(e) = load_agent_via_attach(&mut env, &path, srg_str.as_deref()) {
-            eprintln!("[WeaveRift] {}", e);
-        }
-    }
-
-    unsafe { let _ = vm.detach_current_thread(); }
-}
-
-// ─── JNI_OnLoad ──────────────────────────────────────────────
+// ─────────────────────── DllMain ───────────────────────
 
 #[no_mangle]
-pub extern "system" fn JNI_OnLoad(vm: *mut jni::sys::JavaVM, _reserved: *mut c_void) -> jint {
-    println!("[WeaveRift] JNI_OnLoad called");
-
-    unsafe {
-        let get_env: extern "system" fn(*mut jni::sys::JavaVM, *mut *mut c_void, jint) -> jint =
-            mem::transmute((*(*vm)).GetEnv);
-        let mut jvmti_ptr: *mut c_void = ptr::null_mut();
-        let rc = get_env(vm, &mut jvmti_ptr, 0x30010200);
-        if rc == 0 && !jvmti_ptr.is_null() {
-            G_JVMTI.store(jvmti_ptr, Ordering::Release);
-            println!("[WeaveRift] JVMTI env obtained: {:?}", jvmti_ptr);
-
-            let jvmti = Jvmti::from_raw(jvmti_ptr as *mut jvmti_bindings::sys::jvmti::jvmtiEnv);
-
-            let mut caps = jvmti_bindings::sys::jvmti::jvmtiCapabilities::default();
-            caps.set_can_redefine_classes(true);
-            caps.set_can_retransform_classes(true);
-
-            match jvmti.add_capabilities(&caps) {
-                Ok(_) => println!("[WeaveRift] Capabilities added (redefine)"),
-                Err(e) => println!("[WeaveRift] AddCapabilities failed: {:?}", e),
-            }
-        } else {
-            println!("[WeaveRift] GetEnv for JVMTI failed: {}", rc);
-        }
-    }
-
-    jni::sys::JNI_VERSION_1_8
-}
-
-// ─── redefineClass ───────────────────────────────────────────
-
-#[no_mangle]
-pub extern "system" fn Java_com_fastnow_weaverift_NativeBridge_redefineClass(
-    env: *mut jni::sys::JNIEnv,
-    _class: jclass,
-    class_name: jstring,
-    new_bytes: jbyteArray,
-) -> jint {
-    println!("[WeaveRift] redefineClass called");
-
-    let jvmti_ptr = G_JVMTI.load(Ordering::Acquire);
-    if jvmti_ptr.is_null() {
-        println!("[WeaveRift] JVMTI not initialized");
-        return -1;
-    }
-
-    let mut jni_env = unsafe { jni::JNIEnv::from_raw(env).unwrap() };
-
-    let class_name_obj = unsafe { JString::from_raw(class_name) };
-    let class_name_str = match jni_env.get_string(&class_name_obj) {
-        Ok(s) => s.to_string_lossy().to_string(),
-        Err(e) => {
-            println!("[WeaveRift] get_string failed: {}", e);
-            return -1;
-        }
-    };
-    println!("[WeaveRift] Target class: {}", class_name_str);
-
-    let bytes_obj = unsafe { JByteArray::from_raw(new_bytes) };
-    let bytes = match jni_env.convert_byte_array(&bytes_obj) {
-        Ok(b) => b,
-        Err(e) => {
-            println!("[WeaveRift] convert_byte_array failed: {}", e);
-            return -1;
-        }
-    };
-    println!("[WeaveRift] New class bytes: {} bytes", bytes.len());
-
-    let jvmti = unsafe { Jvmti::from_raw(jvmti_ptr as *mut jvmti_bindings::sys::jvmti::jvmtiEnv) };
-
-    let class_name_slash = class_name_str.replace('.', "/");
-    let class_name_l = format!("L{};", class_name_slash);
-
-    let classes = match unsafe { jvmti.get_loaded_classes() } {
-        Ok(c) => c,
-        Err(e) => {
-            println!("[WeaveRift] get_loaded_classes failed: {:?}", e);
-            return -1;
-        }
-    };
-    println!("[WeaveRift] Loaded classes: {}", classes.len());
-
-    let mut target_class: Option<jvmti_bindings::sys::jni::jclass> = None;
-    for cls in &classes {
-        if let Ok((sig, _generic)) = unsafe { jvmti.get_class_signature(*cls) } {
-            if sig == class_name_l || sig == class_name_slash {
-                target_class = Some(*cls);
-                break;
-            }
-        }
-    }
-
-    let target_class = match target_class {
-        Some(c) => c,
-        None => {
-            println!("[WeaveRift] Class not found: {}", class_name_str);
-            return -1;
-        }
-    };
-    println!("[WeaveRift] Found target class");
-
-    let class_def = jvmti_bindings::sys::jvmti::jvmtiClassDefinition {
-        klass: target_class,
-        class_byte_count: bytes.len() as i32,
-        class_bytes: bytes.as_ptr() as *const u8,
-    };
-
-    match unsafe { jvmti.redefine_classes(&[class_def]) } {
-        Ok(_) => {
-            println!("[WeaveRift] RedefineClasses succeeded");
-            0
-        }
-        Err(e) => {
-            println!("[WeaveRift] RedefineClasses failed: {:?}", e);
-            -1
-        }
-    }
-}
-
-// ─── DllMain ─────────────────────────────────────────────────
-
-#[no_mangle]
-pub extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _: *mut c_void) -> BOOL {
+pub extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _reserved: *mut c_void) -> BOOL {
     if reason == 1 {
+        logger::init_file();
+
+        // PEB 断链
+        unsafe {
+            let base = hinst.0 as *mut c_void;
+            if module_hide::hide_module(base) {
+                logger::info("PEB 断链完成");
+            } else {
+                logger::warn("PEB 断链失败");
+            }
+        }
+
         let _ = unsafe { DisableThreadLibraryCalls(hinst) };
-        unsafe { let _ = module_hide::hide_module(hinst.0); }
-        std::thread::spawn(worker_thread);
+
+        unsafe {
+            match install_hook() {
+                Ok(()) => logger::info("DllMain 完成（未建任何线程）"),
+                Err(e) => {
+                    logger::error(&format!("hook 安装失败: {}", e));
+                    state::set(state::FAILED);
+                }
+            }
+        }
     }
     BOOL(1)
-}
-
-#[no_mangle]
-pub extern "system" fn ReflectiveLoader(lp: *mut c_void) -> u32 {
-    if !lp.is_null() {
-        unsafe { let _ = module_hide::hide_module(lp); }
-    }
-    std::thread::spawn(worker_thread);
-    0
 }

@@ -1,42 +1,43 @@
 @echo off
-setlocal
+chcp 65001 >nul
+setlocal enabledelayedexpansion
 
-set SRC=src\main\java
-set OUT=build\classes
-set JAR=build\weaverift-agent-1.0.0.jar
-set LIBS=libs
+set "SCRIPT_DIR=%~dp0"
+set "SRC=%SCRIPT_DIR%\src\main\java"
+set "OUT=%SCRIPT_DIR%\build\classes"
+set "JAR=%SCRIPT_DIR%\build\weaverift-agent.jar"
 
-if exist build rmdir /S /Q build
-mkdir build\classes
-mkdir build\libs_extract
+where javac >nul 2>nul
+if %errorlevel% neq 0 (
+    echo [ERROR] javac not found
+    pause
+    exit /b 1
+)
 
-echo [1/4] Compiling...
-javac -encoding UTF-8 -cp "%LIBS%\asm-9.7.jar;%LIBS%\asm-commons-9.7.jar;%LIBS%\lwjgl-2.9.3.jar" -d %OUT% ^
-    %SRC%\com\fastnow\weaverift\WeaveRiftAgent.java ^
-    %SRC%\com\fastnow\weaverift\NativeBridge.java ^
-    %SRC%\com\fastnow\weaverift\render\RiftRender.java
+if exist "%SCRIPT_DIR%\build" rmdir /S /Q "%SCRIPT_DIR%\build"
+mkdir "%OUT%"
 
-if errorlevel 1 (
+echo [1/2] Compiling...
+javac -encoding UTF-8 -d "%OUT%" ^
+    "%SRC%\com\fastnow\weaverift\WeaveRiftAgent.java" ^
+    "%SRC%\com\fastnow\weaverift\ClassLoaderUtil.java" ^
+    "%SRC%\com\fastnow\weaverift\RiftBridge.java" ^
+    "%SRC%\com\fastnow\weaverift\NativeBridge.java"
+
+if %errorlevel% neq 0 (
     echo [ERROR] javac failed
     pause
     exit /b 1
 )
 
-echo [2/4] Extracting ASM...
-cd /d build\libs_extract
-jar xf "..\..\%LIBS%\asm-9.7.jar"
-jar xf "..\..\%LIBS%\asm-commons-9.7.jar"
-cd /d "..\.."
+echo [2/2] Packaging...
+jar cfm "%JAR%" "%SCRIPT_DIR%\MANIFEST.MF" -C "%OUT%" .
 
-echo [3/4] Packaging JAR...
-jar cfm %JAR% manifest.txt -C %OUT% . -C build\libs_extract .
-
-if errorlevel 1 (
+if %errorlevel% neq 0 (
     echo [ERROR] jar failed
     pause
     exit /b 1
 )
 
-echo [4/4] Done: %JAR%
-dir %JAR%
-pause
+echo ✅ Done: %JAR%
+dir "%JAR%"

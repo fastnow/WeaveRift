@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WeaveRift 调试台</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --line:#2a2f3a;
+    --fg:#d7dae0; --dim:#8b93a1;
+    --ok:#7ee787; --warn:#f2cc60; --err:#ff7b72; --info:#79c0ff; --trace:#6e7681;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:13px/1.5 "Cascadia Mono",Consolas,"Courier New",monospace}
+  header{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+         padding:10px 14px;border-bottom:1px solid var(--line);background:var(--panel)}
+  h1{font-size:14px;margin:0 14px 0 0;letter-spacing:.05em}
+  button{background:#21262d;color:var(--fg);border:1px solid var(--line);
+         border-radius:5px;padding:4px 10px;cursor:pointer;font:inherit}
+  button:hover{background:#30363d}
+  button.on{background:#1f6feb;border-color:#1f6feb}
+  .pill{padding:2px 8px;border-radius:999px;background:#21262d;
+        border:1px solid var(--line);font-size:12px}
+  .pill b{color:var(--info);font-weight:600}
+  .pill.bad b{color:var(--err)}
+  .spacer{flex:1}
+  #snap{display:flex;gap:14px;flex-wrap:wrap;padding:8px 14px;
+        border-bottom:1px solid var(--line);color:var(--dim);font-size:12px}
+  #snap span b{color:var(--fg);font-weight:600}
+  #filter{padding:6px 14px;border-bottom:1px solid var(--line);
+          display:flex;gap:10px;align-items:center;color:var(--dim)}
+  #log{padding:8px 14px;height:calc(100vh - 190px);overflow:auto;white-space:pre-wrap}
+  .row{padding:1px 0;border-bottom:1px solid #1a1d24}
+  .row.trace{color:var(--trace)} .row.debug{color:var(--dim)}
+  .row.info{color:var(--fg)}   .row.warn{color:var(--warn)}
+  .row.error{color:var(--err)}
+  .t{color:#4d5566;margin-right:8px}
+  small{color:var(--dim)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>WeaveRift</h1>
+  <span class="pill">state <b id="s-state">-</b></span>
+  <span class="pill" id="p-hud">hud <b id="s-hud">-</b></span>
+  <span class="pill" id="p-vm">jni <b id="s-vm">-</b></span>
+  <span class="pill" id="p-ctx">ctx <b id="s-ctx">-</b></span>
+  <span class="pill">hz <b id="s-hz">-</b></span>
+  <span class="spacer"></span>
+  <button id="b-hud">HUD 开关</button>
+  <button onclick="cmd('rescan')">重扫映射</button>
+  <button onclick="cmd('status')">Java 状态</button>
+  <button onclick="cmd('error')">Java 错误</button>
+  <button onclick="cmd('unhook')" style="border-color:#6e2b2b">卸载 Hook</button>
+</header>
+
+<div id="snap">
+  <span>xyz <b id="d-xyz">-</b></span>
+  <span>rot <b id="d-rot">-</b></span>
+  <span>hp <b id="d-hp">-</b></span>
+  <span>ents <b id="d-ents">-</b></span>
+  <span>fps <b id="d-fps">-</b></span>
+</div>
+
+<div id="filter">
+  <label><input type="checkbox" id="f-trace"> TRACE</label>
+  <label><input type="checkbox" id="f-debug" checked> DEBUG</label>
+  <label><input type="checkbox" id="f-info" checked> INFO</label>
+  <label><input type="checkbox" id="f-warn" checked> WARN</label>
+  <label><input type="checkbox" id="f-error" checked> ERROR</label>
+  <label><input type="checkbox" id="f-scroll" checked> 自动滚动</label>
+  <span class="spacer"></span>
+  <label>采样 Hz <input type="range" id="f-hz" min="1" max="60" value="20"
+         style="width:110px"> <b id="f-hzv">20</b></label>
+  <button onclick="clearLog()">清屏</button>
+  <small id="hint"></small>
+</div>
+
+<div id="log"></div>
+
+<script>
+const tok = new URLSearchParams(location.search).get('token') || '';
+let last = 0, timer = null, fpsT0 = performance.now(), fpsN = 0;
+const LVL = ['trace','debug','info','warn','error'];
+const $ = id => document.getElementById(id);
+
+if (!tok) $('hint').textContent = '缺少 token';
+
+async function api(p){
+  const r = await fetch(p + (p.includes('?') ? '&' : '?') + 'token=' + tok);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r;
+}
+
+function addRow(lvl, msg){
+  if (!$('f-' + lvl).checked) return;
+  const box = $('log');
+  const d = document.createElement('div');
+  d.className = 'row ' + lvl;
+  const t = new Date();
+  const ts = String(t.getHours()).padStart(2,'0') + ':'
+           + String(t.getMinutes()).padStart(2,'0') + ':'
+           + String(t.getSeconds()).padStart(2,'0');
+  d.innerHTML = '<span class="t">' + ts + '</span>';
+  d.appendChild(document.createTextNode(msg));
+  box.appendChild(d);
+  while (box.childElementCount > 3000) box.removeChild(box.firstChild);
+  if ($('f-scroll').checked) box.scrollTop = box.scrollHeight;
+}
+
+function setPill(id, ok, text){
+  const el = $(id);
+  el.classList.toggle('bad', !ok);
+  el.querySelector('b').textContent = text;
+}
+
+async function poll(){
+  try{
+    const s = await (await api('/api/status')).json();
+    $('s-state').textContent = s.state;
+    setPill('p-hud', s.hud, s.hud ? 'on' : 'off');
+    setPill('p-vm',  s.vm,  s.vm  ? 'ok' : 'NO VM');
+    setPill('p-ctx', s.ctx, s.ctx ? 'ok' : 'NO CTX');
+    $('s-hz').textContent = s.hz;
+    $('b-hud').classList.toggle('on', s.hud);
+    fpsN++;
+    const now = performance.now();
+    if (now - fpsT0 > 1000){ $('d-fps').textContent = (fpsN*1000/(now-fpsT0)).toFixed(0); fpsT0 = now; fpsN = 0; }
+
+    const l = await (await api('/api/logs?since=' + last)).json();
+    for (const r of l.logs){
+      if (r.seq > last) last = r.seq;
+      addRow(LVL[r.lvl] || 'info', r.msg);
+      const m = r.msg.match(/xyz\s+(-?[\d.]+) (-?[\d.]+) (-?[\d.]+)/);
+      if (m){ $('d-xyz').textContent = m[1] + ' ' + m[2] + ' ' + m[3]; }
+      const rot = r.msg.match(/rot\s+(-?[\d.]+) \/ (-?[\d.]+)/);
+      if (rot) $('d-rot').textContent = rot[1] + ' / ' + rot[2];
+      const hp = r.msg.match(/hp\s+([\d.]+)\/([\d.]+)\s+ents\s+(-?\d+)/);
+      if (hp){ $('d-hp').textContent = hp[1] + '/' + hp[2]; $('d-ents').textContent = hp[3]; }
+      if (/no snapshot/.test(r.msg)){
+        $('d-xyz').textContent = $('d-rot').textContent = $('d-hp').textContent = '-';
+      }
+    }
+  }catch(e){
+    $('hint').textContent = '轮询失败: ' + e.message;
+  }
+}
+
+async function cmd(c){
+  try{
+    const r = await fetch('/api/command?token=' + tok + '&cmd=' + c, {method:'POST'});
+    addRow('info', '> ' + c + '  ->  ' + await r.text());
+  }catch(e){ addRow('error', '> ' + c + '  ->  ' + e.message); }
+  poll();
+}
+
+$('b-hud').onclick = async () => {
+  const s = await (await api('/api/status')).json();
+  cmd(s.hud ? 'hud_off' : 'hud_on');
+};
+$('f-hz').oninput = e => { $('f-hzv').textContent = e.target.value; };
+$('f-hz').onchange = e => { cmd('hz=' + e.target.value); };
+function clearLog(){ $('log').innerHTML = ''; }
+
+poll();
+timer = setInterval(poll, 300);
+</script>
+</body>
+</html>

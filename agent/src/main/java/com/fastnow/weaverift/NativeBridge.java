@@ -3,19 +3,18 @@ package com.fastnow.weaverift;
 public class NativeBridge {
     static {
         try {
-            // 从系统属性拿 DLL 路径
             String dllPath = System.getProperty("weaverift.dll");
             if (dllPath != null) {
                 System.load(dllPath);
-                System.out.println("[WeaveRift] Loaded native lib: " + dllPath);
+                System.out.println("[WeaveRift] NativeBridge: loaded " + dllPath);
             } else {
-                System.out.println("[WeaveRift] weaverift.dll not set, native methods unavailable");
+                System.out.println("[WeaveRift] NativeBridge: weaverift.dll 属性未设置");
             }
         } catch (Throwable t) {
-            System.out.println("[WeaveRift] Failed to load native lib:");
+            System.out.println("[WeaveRift] NativeBridge: System.load 失败");
             t.printStackTrace();
         }
     }
 
-    public static native int redefineClass(String className, byte[] newBytes);
+    public static native void registerBridge(Class<?> bridgeClass);
 }
