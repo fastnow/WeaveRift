@@ -1,6 +1,6 @@
 {
-  "title": "WeaveRift v1.0.5",
-  "version": "1.0.5",
-  "description": "Native Hook 版本（架构重写）：\n- 核心变更：hook opengl32!wglSwapBuffers 拿渲染时机，渲染完全绕过 JVM，不再修改任何字节码\n- 独立 GL context：用 hook 传入的游戏 HDC 建第二个 context，wglShareLists 与游戏共享资源，GL 状态互不污染\n- 时序修正：画在 swap 之前，不再有「画进下一帧 back buffer 被 glClear 抹掉」的问题\n- JNI 只用 GetEnv()，不调用 AttachCurrentThread，避免触发 ThreadStart 事件\n- 帧驱动状态机：DllMain 只装 hook，初始化切片推进，杜绝 loader lock 死锁\n- 新增 127.0.0.1 调试台：实时日志流 + 状态自检 + 反向控制（开关 HUD / 调采样率 / 重扫映射 / 卸载 hook）\n- 新增 ClassLoaderUtil：从 Launch.classLoader 或 getAllLoadedClasses() 定位游戏 ClassLoader\n- 新增 console.html：外置控制台页面，改界面无需重新编译\n- 移除 ASM：不再改字节码，asm / asm-commons 从 agent/libs/ 删除\n- 移除 lwjgl-2.9.3.jar：不在 Java 层画 GL，避免双份 LWJGL 导致 GLContext ThreadLocal 为空\n- 移除 RiftRender / RiftTransformer / NativeBridge.redefineClass / jvmti-bindings\n- 移除 module_hide：研究调试工具不需要 PEB 断链，且会挡住自己的调试器\n- 自包含 x64 inline hook，不再依赖第三方 hooking crate\n- Agent 改为只读采样，20Hz 写入 RiftBridge 快照\n\n使用注意：\n- 注入顺序：先注入 agent，再注入 DLL\n- Forge 环境可不提供 obf2srg.srg；原版必须提供\n- 本压缩包不含 obf2srg.srg，请自行从 kettingpowered/MinecraftMappings 的 mappings 分支下载对应版本文件，放到 WeaveRift/ 目录下",
+  "title": "WeaveRift v1.0.6",
+  "version": "1.0.6",
+  "description": "模块化架构版本：\n- 新增 client.dll 独立模块系统，功能以模块形式注册\n- ModuleManager 管理模块开关，Right Shift 打开客户端面板\n- 内置模块：HUD / Tracers / ESP\n- 修复实体分类：使用 IMob 接口覆盖所有敌对生物\n- 优化渲染性能：GL 函数指针缓存、矩阵缓存、按颜色合批\n\n使用注意：\n- 注入顺序：先注入 agent，再注入 DLL\n- Forge 环境可不提供 obf2srg.srg；原版必须提供\n- 本压缩包不含 obf2srg.srg，请自行从 kettingpowered/MinecraftMappings 的 mappings 分支下载对应版本文件，放到 WeaveRift/ 目录下",
   "release": true
 }

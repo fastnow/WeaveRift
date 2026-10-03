@@ -9,31 +9,35 @@ import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.jar.JarFile;
 
-/**
- * WeaveRift agent —— 只读采样，不改任何字节码。
- *
- * <p>v3 起支持两种加载方式：
- * <ul>
- *   <li><b>Attach API</b>：agentmain(args, instrumentation)，instrumentation 非 null</li>
- *   <li><b>ClassLoader 直接调用</b>：agentmain(args, null)，instrumentation 为 null</li>
- * </ul>
- *
- * <p>第二种方式完全绕过 jdk.attach.allowAttachSelf 限制。
- */
 public class WeaveRiftAgent {
 
-    private static final Map<String, String> CLASS_MAP = new HashMap<>();
-    private static final Map<String, String> FIELD_MAP = new HashMap<>();
-    private static final Map<String, String> METHOD_MAP = new HashMap<>();
+    static final Map<String, String> CLASS_MAP = new HashMap<>();
+    static final Map<String, String> FIELD_MAP = new HashMap<>();
+    static final Map<String, MethodMapping> METHOD_MAP = new HashMap<>();
+
+    static final class MethodMapping {
+        final String obfName;
+        final String obfSig;
+        final String srgSig;
+
+        MethodMapping(String obfName, String obfSig, String srgSig) {
+            this.obfName = obfName;
+            this.obfSig = obfSig;
+            this.srgSig = srgSig;
+        }
+    }
 
     private static volatile String srgPath = "";
+    private static volatile String version = "";
     private static volatile ClassLoader gameCl = null;
     private static volatile Instrumentation inst = null;
     private static volatile boolean ready = false;
     private static volatile String status = "init";
+    private static volatile VersionProbe.Namespace namespace = VersionProbe.Namespace.UNKNOWN;
 
     private static Class<?> mcClass;
     private static Object mcInstance;
@@ -42,23 +46,41 @@ public class WeaveRiftAgent {
     private static Method healthM, maxHealthM;
     private static Field worldField, entityListField;
 
-    private static final long PERIOD_MS = 50;
+    private static Class<?> entityPlayerCls;
+    private static Class<?> entityMobCls;
+    private static Class<?> entityAnimalCls;
 
-    // ─────────────────────── 入口 ───────────────────────
+    private static Method mouseSetGrabbedM;
+    private static Method displayIsActiveM;
+
+    private static final int MAX_ENTS = 32;
+    private static final long PERIOD_MS = 50;
+    private static volatile boolean dumpedUnknown = false;
+
+    public static void entry(String args) {
+        System.out.println("[WeaveRift] entry, args=" + args);
+        realInit(args, null);
+    }
 
     public static void agentmain(String args, Instrumentation instrumentation) {
         System.out.println("[WeaveRift] agentmain, args=" + args);
+        realInit(args, instrumentation);
+    }
+
+    public static void premain(String args, Instrumentation instrumentation) {
+        agentmain(args, instrumentation);
+    }
+
+    private static void realInit(String args, Instrumentation instrumentation) {
         inst = instrumentation;
         parseArgs(args);
 
-        // ★ instrumentation 为 null 时（ClassLoader 模式），跳过 append
         if (instrumentation != null) {
             appendSelfToSystemClassLoader(instrumentation);
         } else {
             System.out.println("[WeaveRift] 无 Instrumentation（ClassLoader 模式）");
         }
 
-        // 反向注册 RiftBridge
         try {
             NativeBridge.registerBridge(RiftBridge.class);
             System.out.println("[WeaveRift] RiftBridge 注册成功");
@@ -72,14 +94,8 @@ public class WeaveRiftAgent {
         t.start();
     }
 
-    public static void premain(String args, Instrumentation instrumentation) {
-        agentmain(args, instrumentation);
-    }
-
     private static void parseArgs(String args) {
-        if (args == null || args.isEmpty()) {
-            return;
-        }
+        if (args == null || args.isEmpty()) return;
         for (String part : args.split(";")) {
             if (part.startsWith("srg=")) {
                 srgPath = part.substring(4).trim();
@@ -87,17 +103,16 @@ public class WeaveRiftAgent {
                 String dll = part.substring(4).trim();
                 System.setProperty("weaverift.dll", dll);
                 System.out.println("[WeaveRift] weaverift.dll = " + dll);
+            } else if (part.startsWith("version=")) {
+                version = part.substring(8).trim();
+                System.out.println("[WeaveRift] version = " + version);
             }
         }
-        if (srgPath.isEmpty()) {
-            srgPath = args.trim();
-        }
+        if (srgPath.isEmpty()) srgPath = args.trim();
     }
 
     private static void appendSelfToSystemClassLoader(Instrumentation instrumentation) {
-        if (instrumentation == null) {
-            return;
-        }
+        if (instrumentation == null) return;
         try {
             File self = new File(WeaveRiftAgent.class.getProtectionDomain()
                     .getCodeSource().getLocation().toURI());
@@ -110,8 +125,6 @@ public class WeaveRiftAgent {
         }
     }
 
-    // ─────────────────────── 主循环 ───────────────────────
-
     private static void run() {
         try {
             status = "waiting";
@@ -121,46 +134,65 @@ public class WeaveRiftAgent {
             gameCl = ClassLoaderUtil.find(inst);
             System.out.println("[WeaveRift] game classloader = " + gameCl);
 
-            mcClass = ClassLoaderUtil.tryLoad(gameCl,
-                    "net.minecraft.client.Minecraft",
-                    obfClassOf("net/minecraft/client/Minecraft"));
-            if (mcClass == null) {
-                status = "mc class not found";
+            VersionProbe.Result ver;
+            try {
+                ver = VersionProbe.probe(gameCl, version);
+            } catch (Exception e) {
+                System.out.println("[WeaveRift] 版本探测失败: " + e.getMessage());
+                status = "version probe failed";
                 RiftBridge.setError(status);
-                System.out.println("[WeaveRift] 找不到 Minecraft 类");
                 return;
             }
+            System.out.println("[WeaveRift] 探测结果: " + ver);
+            namespace = ver.namespace;
+            mcClass = ver.minecraftClass;
             System.out.println("[WeaveRift] Minecraft = " + mcClass.getName());
 
-            mcInstance = invokeStatic(mcClass,
-                    "net/minecraft/client/Minecraft/func_71410_x");
+            VersionConfig config;
+            try {
+                config = VersionConfig.load(ver.mcVersion);
+                System.out.println("[WeaveRift] VersionConfig: " + config);
+            } catch (Throwable t) {
+                System.out.println("[WeaveRift] VersionConfig 加载失败: " + t);
+                status = "config load failed";
+                RiftBridge.setError(status);
+                return;
+            }
+
+            NamespaceResolver resolver = new NamespaceResolver(
+                    namespace, CLASS_MAP, FIELD_MAP, METHOD_MAP);
+
+            ClassCache.init(gameCl, config, resolver);
+            FieldCache.init(config, resolver);
+            MethodCache.init(config, resolver);
+
+            mcInstance = MethodCache.invokeStatic("Minecraft.func_71410_x");
             if (mcInstance == null) {
                 status = "mc instance null";
                 RiftBridge.setError(status);
                 return;
             }
 
-            playerField = findField(mcClass,
-                    "net/minecraft/client/Minecraft/field_71439_g");
-            xF = findField(playerClass(), "net/minecraft/entity/Entity/field_70165_t");
-            yF = findField(playerClass(), "net/minecraft/entity/Entity/field_70163_u");
-            zF = findField(playerClass(), "net/minecraft/entity/Entity/field_70161_v");
-            yawF = findField(playerClass(), "net/minecraft/entity/Entity/field_70177_z");
-            pitchF = findField(playerClass(), "net/minecraft/entity/Entity/field_70125_A");
-            healthM = findMethod(playerClass(),
-                    "net/minecraft/entity/EntityLivingBase/func_110143_aJ");
-            maxHealthM = findMethod(playerClass(),
-                    "net/minecraft/entity/EntityLivingBase/func_110138_aP");
+            playerField = FieldCache.get("Minecraft.field_71439_g");
+            xF = FieldCache.get("Entity.field_70165_t");
+            yF = FieldCache.get("Entity.field_70163_u");
+            zF = FieldCache.get("Entity.field_70161_v");
+            yawF = FieldCache.get("Entity.field_70177_z");
+            pitchF = FieldCache.get("Entity.field_70125_A");
+            healthM = MethodCache.get("EntityLivingBase.func_110143_aJ");
+            maxHealthM = MethodCache.get("EntityLivingBase.func_110138_aP");
 
-            worldField = findField(mcClass,
-                    "net/minecraft/client/Minecraft/field_71441_e");
-            Class<?> worldCl = ClassLoaderUtil.tryLoad(gameCl,
-                    "net.minecraft.world.World",
-                    obfClassOf("net/minecraft/world/World"));
-            if (worldCl != null) {
-                entityListField = findField(worldCl,
-                        "net/minecraft/world/World/field_72996_f");
+            worldField = FieldCache.get("Minecraft.field_71441_e");
+            entityListField = FieldCache.get("World.field_72996_f");
+
+            if (playerField == null) {
+                status = "playerField null";
+                RiftBridge.setError(status);
+                return;
             }
+
+            initEntityClasses();
+            initInputBridge();
 
             ready = true;
             status = "ready";
@@ -178,19 +210,42 @@ public class WeaveRiftAgent {
         }
     }
 
-    private static Class<?> playerClass() {
+    private static void initEntityClasses() {
+        entityPlayerCls = loadBySrg("net/minecraft/entity/player/EntityPlayer");
+        entityMobCls = loadBySrg("net/minecraft/entity/monster/IMob");
+        entityAnimalCls = loadBySrg("net/minecraft/entity/passive/EntityAnimal");
+        System.out.println("[WeaveRift] entity classes: player=" + entityPlayerCls
+                + " mob=" + entityMobCls + " animal=" + entityAnimalCls);
+    }
+
+    private static void initInputBridge() {
         try {
-            Object p = playerField.get(mcInstance);
-            if (p != null) {
-                return p.getClass();
-            }
-        } catch (Throwable ignored) {
+            Class<?> mouseCls = Class.forName("org.lwjgl.input.Mouse", false, gameCl);
+            mouseSetGrabbedM = mouseCls.getMethod("setGrabbed", boolean.class);
+            System.out.println("[WeaveRift] Mouse.setGrabbed 已绑定");
+        } catch (Throwable t) {
+            System.out.println("[WeaveRift] Mouse.setGrabbed 绑定失败: " + t);
         }
-        return ClassLoaderUtil.tryLoad(gameCl,
-                "net.minecraft.client.entity.EntityPlayerSP",
-                "net.minecraft.entity.player.EntityPlayer",
-                "net.minecraft.entity.EntityLivingBase",
-                "net.minecraft.entity.Entity");
+
+        try {
+            Class<?> displayCls = Class.forName("org.lwjgl.opengl.Display", false, gameCl);
+            displayIsActiveM = displayCls.getMethod("isActive");
+            System.out.println("[WeaveRift] Display.isActive 已绑定");
+        } catch (Throwable t) {
+            System.out.println("[WeaveRift] Display.isActive 绑定失败: " + t);
+        }
+    }
+
+    private static Class<?> loadBySrg(String srgFull) {
+        String obf = CLASS_MAP.get(srgFull);
+        String name = obf != null ? obf.replace('/', '.') : srgFull.replace('/', '.');
+        try {
+            return Class.forName(name, false, gameCl);
+        } catch (Throwable t) {
+            System.out.println("[WeaveRift] loadBySrg 失败: " + srgFull
+                    + " (obf=" + obf + ") - " + t);
+            return null;
+        }
     }
 
     private static void sample() {
@@ -207,117 +262,106 @@ public class WeaveRiftAgent {
             float pitch = pitchF.getFloat(p);
 
             float hp = 20f, maxHp = 20f;
-            if (healthM != null) {
-                hp = ((Number) healthM.invoke(p)).floatValue();
-            }
-            if (maxHealthM != null) {
-                maxHp = ((Number) maxHealthM.invoke(p)).floatValue();
-            }
+            if (healthM != null) hp = ((Number) healthM.invoke(p)).floatValue();
+            if (maxHealthM != null) maxHp = ((Number) maxHealthM.invoke(p)).floatValue();
 
-            int ents = -1;
+            List<?> ents = null;
             try {
                 if (worldField != null && entityListField != null) {
                     Object w = worldField.get(mcInstance);
-                    if (w != null) {
-                        ents = ((java.util.List<?>) entityListField.get(w)).size();
-                    }
+                    if (w != null) ents = (List<?>) entityListField.get(w);
                 }
-            } catch (Throwable ignored) {
+            } catch (Throwable ignored) {}
+
+            int entCount = ents == null ? -1 : ents.size();
+
+            double[] out = new double[9 + MAX_ENTS * 6];
+            out[0] = 1;
+            out[1] = x;
+            out[2] = y;
+            out[3] = z;
+            out[4] = yaw;
+            out[5] = pitch;
+            out[6] = hp;
+            out[7] = maxHp;
+            out[8] = entCount;
+
+            int n = 0;
+            if (ents != null) {
+                for (Object e : ents) {
+                    if (n >= MAX_ENTS) break;
+                    if (e == p) continue;
+                    try {
+                        Class<?> ec = e.getClass();
+                        double ex = getDouble(e, ec, xF.getName());
+                        double ey = getDouble(e, ec, yF.getName());
+                        double ez = getDouble(e, ec, zF.getName());
+                        float ehp = 20f;
+                        if (healthM != null) {
+                            try { ehp = ((Number) healthM.invoke(e)).floatValue(); }
+                            catch (Throwable ignored) {}
+                        }
+                        int type = classifyEntity(ec);
+
+                        if (type == 0 && !dumpedUnknown) {
+                            dumpedUnknown = true;
+                            System.out.println("[WeaveRift] unknown entity: " + ec.getName());
+                        }
+
+                        int off = 9 + n * 6;
+                        out[off]     = ex;
+                        out[off + 1] = ey;
+                        out[off + 2] = ez;
+                        out[off + 3] = ehp;
+                        out[off + 4] = type;
+                        out[off + 5] = 0;
+                        n++;
+                    } catch (Throwable ignored) {}
+                }
             }
 
-            RiftBridge.updateSnapshot(1, x, y, z, yaw, pitch, hp, maxHp, ents);
+            RiftBridge.updateSnapshotFull(out);
+
+            updateInputState();
         } catch (Throwable t) {
             RiftBridge.updateSnapshot(0, 0, 0, 0, 0, 0, 0, 0, -1);
             RiftBridge.setError(String.valueOf(t));
         }
     }
 
-    // ─────────────────────── 反射工具 ───────────────────────
-
-    private static Field findField(Class<?> cls, String mappedFull) {
-        if (cls == null || mappedFull == null) {
-            return null;
-        }
-        String srg = simple(mappedFull);
-        String obf = FIELD_MAP.get(mappedFull);
-        String obfSimple = obf == null ? null : simple(obf);
-
-        Class<?> c = cls;
-        while (c != null) {
-            for (String n : new String[]{srg, obfSimple}) {
-                if (n == null) {
-                    continue;
-                }
-                try {
-                    Field f = c.getDeclaredField(n);
-                    f.setAccessible(true);
-                    return f;
-                } catch (Throwable ignored) {
-                }
+    private static void updateInputState() {
+        try {
+            if (mouseSetGrabbedM != null) {
+                mouseSetGrabbedM.invoke(null, RiftBridge.isMouseGrabbed());
             }
-            c = c.getSuperclass();
-        }
-        log("[WeaveRift] 字段缺失: " + mappedFull);
-        return null;
+        } catch (Throwable ignored) {}
+
+        try {
+            if (displayIsActiveM != null) {
+                displayIsActiveM.invoke(null);
+            }
+        } catch (Throwable ignored) {}
     }
 
-    private static Method findMethod(Class<?> cls, String mappedFull) {
-        if (cls == null || mappedFull == null) {
-            return null;
-        }
-        String srg = simple(mappedFull);
-        String obf = METHOD_MAP.get(mappedFull);
-        String obfSimple = obf == null ? null : simple(obf);
-
+    private static double getDouble(Object obj, Class<?> cls, String fieldName) {
         Class<?> c = cls;
         while (c != null) {
-            for (String n : new String[]{srg, obfSimple}) {
-                if (n == null) {
-                    continue;
-                }
-                try {
-                    Method m = c.getDeclaredMethod(n);
-                    m.setAccessible(true);
-                    return m;
-                } catch (Throwable ignored) {
-                }
-            }
-            c = c.getSuperclass();
-        }
-        log("[WeaveRift] 方法缺失: " + mappedFull);
-        return null;
-    }
-
-    private static Object invokeStatic(Class<?> cls, String mappedFull) {
-        String srg = simple(mappedFull);
-        String obf = METHOD_MAP.get(mappedFull);
-        String obfSimple = obf == null ? null : simple(obf);
-        for (String n : new String[]{srg, obfSimple}) {
-            if (n == null) {
-                continue;
-            }
             try {
-                Method m = cls.getDeclaredMethod(n);
-                m.setAccessible(true);
-                return m.invoke(null);
-            } catch (Throwable ignored) {
-            }
+                Field f = c.getDeclaredField(fieldName);
+                f.setAccessible(true);
+                return f.getDouble(obj);
+            } catch (Throwable ignored) {}
+            c = c.getSuperclass();
         }
-        log("[WeaveRift] 静态方法缺失: " + mappedFull);
-        return null;
+        return 0;
     }
 
-    private static String obfClassOf(String mapped) {
-        String obf = CLASS_MAP.get(mapped);
-        return obf == null ? null : obf.replace('/', '.');
+    private static int classifyEntity(Class<?> ec) {
+        if (entityPlayerCls != null && entityPlayerCls.isAssignableFrom(ec)) return 1;
+        if (entityMobCls != null && entityMobCls.isAssignableFrom(ec)) return 2;
+        if (entityAnimalCls != null && entityAnimalCls.isAssignableFrom(ec)) return 3;
+        return 0;
     }
-
-    private static String simple(String full) {
-        int i = full.lastIndexOf('/');
-        return i < 0 ? full : full.substring(i + 1);
-    }
-
-    // ─────────────────────── SRG 映射 ───────────────────────
 
     static boolean reloadMappings() {
         CLASS_MAP.clear();
@@ -326,36 +370,35 @@ public class WeaveRiftAgent {
         try {
             if (srgPath.isEmpty() || !Files.exists(Paths.get(srgPath))) {
                 status = "srg missing (走纯 SRG 名路径)";
-                log("[WeaveRift] 未配置 srg，假定运行时已是 SRG 名（Forge）");
+                System.out.println("[WeaveRift] 未配置 srg，假定运行时已是 SRG 名（Forge）");
                 return true;
             }
             try (BufferedReader r = new BufferedReader(new FileReader(srgPath))) {
                 String line;
                 while ((line = r.readLine()) != null) {
                     line = line.trim();
-                    if (line.isEmpty() || line.startsWith("#")) {
-                        continue;
-                    }
+                    if (line.isEmpty() || line.startsWith("#")) continue;
                     if (line.startsWith("CL:")) {
                         String[] p = line.substring(3).trim().split("\\s+");
-                        if (p.length >= 2) {
-                            CLASS_MAP.put(p[1], p[0]);
-                        }
+                        if (p.length >= 2) CLASS_MAP.put(p[1], p[0]);
                     } else if (line.startsWith("FD:")) {
                         String[] p = line.substring(3).trim().split("\\s+");
-                        if (p.length >= 2) {
-                            FIELD_MAP.put(p[1], p[0]);
-                        }
+                        if (p.length >= 2) FIELD_MAP.put(p[1], p[0]);
                     } else if (line.startsWith("MD:")) {
                         String[] p = line.substring(3).trim().split("\\s+");
                         if (p.length >= 4) {
-                            METHOD_MAP.put(p[2], p[0]);
+                            String obfPath = p[0];
+                            String obfSig = p[1];
+                            String srgPath = p[2];
+                            String srgSig = p[3];
+                            String obfName = obfPath.substring(obfPath.lastIndexOf('/') + 1);
+                            METHOD_MAP.put(srgPath, new MethodMapping(obfName, obfSig, srgSig));
                         }
                     }
                 }
             }
             status = "mappings ok (" + CLASS_MAP.size() + " classes)";
-            log("[WeaveRift] SRG 载入: " + srgPath
+            System.out.println("[WeaveRift] SRG 载入: " + srgPath
                     + " class=" + CLASS_MAP.size()
                     + " field=" + FIELD_MAP.size()
                     + " method=" + METHOD_MAP.size());
@@ -371,9 +414,5 @@ public class WeaveRiftAgent {
         return "ready=" + ready + " status=" + status
                 + " cl=" + (gameCl == null ? "null" : gameCl.getClass().getName())
                 + " mc=" + (mcClass == null ? "null" : mcClass.getName());
-    }
-
-    private static void log(String s) {
-        System.out.println(s);
     }
 }

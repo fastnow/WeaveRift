@@ -35,6 +35,7 @@ jobs:
           workspaces: |
             . -> target
             jar_loader -> target
+            client -> target
           cache-on-failure: "true"
 
       - name: Read version.json metadata
@@ -58,7 +59,6 @@ jobs:
             Add-Content $env:GITHUB_OUTPUT "release=false"
           }
 
-
       - name: Build WeaveRift.exe
         run: cargo build --release
 
@@ -71,6 +71,10 @@ jobs:
         working-directory: jar_loader
         run: cargo build --release
 
+      - name: Build client.dll
+        working-directory: client
+        run: cargo build --release
+
       - name: Assemble release folder
         shell: pwsh
         run: |
@@ -78,8 +82,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path release\WeaveRift | Out-Null
 
           Copy-Item target\release\WeaveRift.exe release\ -Force
-
           Copy-Item jar_loader\target\release\jar_loader.dll release\WeaveRift\ -Force
+          Copy-Item client\target\release\client.dll release\WeaveRift\ -Force
 
           $jar = Get-ChildItem -Path agent\build -Filter 'weaverift-agent*.jar' -File |
                  Select-Object -First 1
@@ -115,6 +119,7 @@ jobs:
           $required = @(
             'release\WeaveRift.exe',
             'release\WeaveRift\jar_loader.dll',
+            'release\WeaveRift\client.dll',
             'release\WeaveRift\weaverift-agent.jar'
           )
           $missing = @()

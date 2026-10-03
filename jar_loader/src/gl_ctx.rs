@@ -83,17 +83,24 @@ pub unsafe fn end() -> bool {
     wglMakeCurrent(hdc, game).is_ok()
 }
 
-pub unsafe fn viewport_size(hdc: HDC) -> (i32, i32) {
-    let hwnd = WindowFromDC(hdc);
-    if hwnd.0.is_null() {
-        return (854, 480);
+pub unsafe fn viewport_size(_hdc: HDC) -> (i32, i32) {
+    use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+    use windows::core::{PCSTR, PCWSTR};
+
+    let opengl32_name: Vec<u16> = "opengl32.dll\0".encode_utf16().collect();
+    if let Ok(hmod) = GetModuleHandleW(PCWSTR(opengl32_name.as_ptr())) {
+        if let Some(p) = GetProcAddress(hmod, PCSTR(b"glGetIntegerv\0".as_ptr())) {
+            type Fn = unsafe extern "system" fn(u32, *mut i32);
+            let f: Fn = std::mem::transmute(p);
+            let mut vp = [0i32; 4];
+            const GL_VIEWPORT: u32 = 0x0BA2;
+            f(GL_VIEWPORT, vp.as_mut_ptr());
+            if vp[2] > 0 && vp[3] > 0 {
+                return (vp[2], vp[3]);
+            }
+        }
     }
-    let mut r = RECT::default();
-    if GetClientRect(hwnd, &mut r).is_ok() {
-        (r.right - r.left, r.bottom - r.top)
-    } else {
-        (854, 480)
-    }
+    (854, 480)
 }
 
 pub unsafe fn destroy() {

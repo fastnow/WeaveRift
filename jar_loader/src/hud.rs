@@ -1,219 +1,148 @@
-//! HUD 绘制。
-
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::time::Instant;
 
-use windows::core::PCSTR;
-use windows::Win32::Graphics::Gdi::{
-    HDC, CreateFontW, SelectObject, HGDIOBJ, FW_NORMAL,
-    ANTIALIASED_QUALITY, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-    CLIP_DEFAULT_PRECIS, DEFAULT_PITCH,
-};
+use windows::Win32::Graphics::Gdi::HDC;
 use windows::Win32::Graphics::OpenGL::wglUseFontBitmapsA;
+use windows::Win32::System::LibraryLoader::{
+    GetModuleHandleW, GetProcAddress,
+};
+use windows::core::{PCSTR, PCWSTR};
 
 use crate::jni_bridge::Snapshot;
 use crate::logger;
 
-// GL 常量
-const GL_PROJECTION: u32 = 0x1701;
-const GL_MODELVIEW: u32 = 0x1700;
-const GL_DEPTH_TEST: u32 = 0x0B71;
-const GL_TEXTURE_2D: u32 = 0x0DE1;
-const GL_BLEND: u32 = 0x0BE2;
-const GL_LIGHTING: u32 = 0x0B50;
-const GL_CULL_FACE: u32 = 0x0B44;
-const GL_SRC_ALPHA: u32 = 0x0302;
-const GL_ONE_MINUS_SRC_ALPHA: u32 = 0x0303;
-const GL_QUADS: u32 = 0x0007;
-const GL_LINES: u32 = 0x0001;
-const GL_UNSIGNED_BYTE: u32 = 0x1401;
-const GL_LINE_STRIP: u32 = 0x0003;
+type F1 = unsafe extern "system" fn(u32);
+type F2 = unsafe extern "system" fn(u32, u32);
+type F2f = unsafe extern "system" fn(f32, f32);
+type F4f = unsafe extern "system" fn(f32, f32, f32, f32);
+type F6d = unsafe extern "system" fn(f64, f64, f64, f64, f64, f64);
+type V = unsafe extern "system" fn();
+type CallLists = unsafe extern "system" fn(i32, u32, *const c_void);
 
-#[allow(non_camel_case_types)]
-type fn_glViewport = unsafe extern "system" fn(i32, i32, i32, i32);
-#[allow(non_camel_case_types)]
-type fn_glMatrixMode = unsafe extern "system" fn(u32);
-#[allow(non_camel_case_types)]
-type fn_glLoadIdentity = unsafe extern "system" fn();
-#[allow(non_camel_case_types)]
-type fn_glOrtho = unsafe extern "system" fn(f64, f64, f64, f64, f64, f64);
-#[allow(non_camel_case_types)]
-type fn_glPushMatrix = unsafe extern "system" fn();
-#[allow(non_camel_case_types)]
-type fn_glPopMatrix = unsafe extern "system" fn();
-#[allow(non_camel_case_types)]
-type fn_glEnable = unsafe extern "system" fn(u32);
-#[allow(non_camel_case_types)]
-type fn_glDisable = unsafe extern "system" fn(u32);
-#[allow(non_camel_case_types)]
-type fn_glBlendFunc = unsafe extern "system" fn(u32, u32);
-#[allow(non_camel_case_types)]
-type fn_glColor4f = unsafe extern "system" fn(f32, f32, f32, f32);
-#[allow(non_camel_case_types)]
-type fn_glLineWidth = unsafe extern "system" fn(f32);
-#[allow(non_camel_case_types)]
-type fn_glBegin = unsafe extern "system" fn(u32);
-#[allow(non_camel_case_types)]
-type fn_glEnd = unsafe extern "system" fn();
-#[allow(non_camel_case_types)]
-type fn_glVertex2f = unsafe extern "system" fn(f32, f32);
-#[allow(non_camel_case_types)]
-type fn_glFlush = unsafe extern "system" fn();
-#[allow(non_camel_case_types)]
-type fn_glGenLists = unsafe extern "system" fn(u32) -> u32;
-#[allow(non_camel_case_types)]
-type fn_glListBase = unsafe extern "system" fn(u32);
-#[allow(non_camel_case_types)]
-type fn_glCallLists = unsafe extern "system" fn(i32, u32, *const c_void);
-#[allow(non_camel_case_types)]
-type fn_glRasterPos2f = unsafe extern "system" fn(f32, f32);
-
-macro_rules! decl {
-    ($($n:ident : $t:ty),* $(,)?) => {
-        pub struct Gl { $(pub $n: $t,)* }
-    };
+struct GlFns {
+    push_attrib: F1,
+    pop_attrib: V,
+    push_matrix: V,
+    pop_matrix: V,
+    matrix_mode: F1,
+    load_identity: V,
+    ortho: F6d,
+    disable: F1,
+    enable: F1,
+    blend_func: F2,
+    color4f: F4f,
+    begin: F1,
+    end: V,
+    vertex2f: F2f,
+    line_width: F1,
+    raster_pos2f: F2f,
+    list_base: F1,
+    call_lists: CallLists,
 }
 
-decl! {
-    glViewport: fn_glViewport,
-    glMatrixMode: fn_glMatrixMode,
-    glLoadIdentity: fn_glLoadIdentity,
-    glOrtho: fn_glOrtho,
-    glPushMatrix: fn_glPushMatrix,
-    glPopMatrix: fn_glPopMatrix,
-    glEnable: fn_glEnable,
-    glDisable: fn_glDisable,
-    glBlendFunc: fn_glBlendFunc,
-    glColor4f: fn_glColor4f,
-    glLineWidth: fn_glLineWidth,
-    glBegin: fn_glBegin,
-    glEnd: fn_glEnd,
-    glVertex2f: fn_glVertex2f,
-    glFlush: fn_glFlush,
-    glGenLists: fn_glGenLists,
-    glListBase: fn_glListBase,
-    glCallLists: fn_glCallLists,
-    glRasterPos2f: fn_glRasterPos2f,
-}
-
-static GL: OnceLock<Gl> = OnceLock::new();
+static GL_FNS: OnceLock<GlFns> = OnceLock::new();
 static FONT_BASE: OnceLock<u32> = OnceLock::new();
+static HUD_VISIBLE: AtomicBool = AtomicBool::new(true);
+static INJECT_TIME: OnceLock<Instant> = OnceLock::new();
 
-unsafe fn sym<T>(hmod: windows::Win32::Foundation::HMODULE, name: &str) -> Result<T, String> {
-    let p = windows::Win32::System::LibraryLoader::GetProcAddress(
-        hmod,
-        PCSTR(format!("{}\0", name).as_ptr()),
-    )
-    .ok_or_else(|| format!("GetProcAddress({}) 失败", name))?;
-    Ok(std::mem::transmute_copy::<*const (), T>(&(p as *const ())))
+pub fn toggle_hud() -> bool {
+    let cur = HUD_VISIBLE.load(Ordering::Relaxed);
+    let new = !cur;
+    HUD_VISIBLE.store(new, Ordering::Relaxed);
+    new
+}
+
+pub fn hud_visible() -> bool {
+    HUD_VISIBLE.load(Ordering::Relaxed)
+}
+
+pub fn mark_injected() {
+    let _ = INJECT_TIME.set(Instant::now());
 }
 
 pub unsafe fn load_gl() -> Result<(), String> {
-    let hmod = windows::Win32::System::LibraryLoader::GetModuleHandleA(
-        PCSTR(b"opengl32.dll\0".as_ptr()),
-    )
-    .map_err(|_| "opengl32.dll 未加载".to_string())?;
+    let opengl32_name: Vec<u16> = "opengl32.dll\0".encode_utf16().collect();
+    let hmod = GetModuleHandleW(PCWSTR(opengl32_name.as_ptr()))
+        .map_err(|_| "opengl32.dll not loaded")?;
 
-    let g = Gl {
-        glViewport: sym(hmod, "glViewport")?,
-        glMatrixMode: sym(hmod, "glMatrixMode")?,
-        glLoadIdentity: sym(hmod, "glLoadIdentity")?,
-        glOrtho: sym(hmod, "glOrtho")?,
-        glPushMatrix: sym(hmod, "glPushMatrix")?,
-        glPopMatrix: sym(hmod, "glPopMatrix")?,
-        glEnable: sym(hmod, "glEnable")?,
-        glDisable: sym(hmod, "glDisable")?,
-        glBlendFunc: sym(hmod, "glBlendFunc")?,
-        glColor4f: sym(hmod, "glColor4f")?,
-        glLineWidth: sym(hmod, "glLineWidth")?,
-        glBegin: sym(hmod, "glBegin")?,
-        glEnd: sym(hmod, "glEnd")?,
-        glVertex2f: sym(hmod, "glVertex2f")?,
-        glFlush: sym(hmod, "glFlush")?,
-        glGenLists: sym(hmod, "glGenLists")?,
-        glListBase: sym(hmod, "glListBase")?,
-        glCallLists: sym(hmod, "glCallLists")?,
-        glRasterPos2f: sym(hmod, "glRasterPos2f")?,
+    macro_rules! load {
+        ($name:literal, $ty:ty) => {
+            std::mem::transmute::<_, $ty>(
+                GetProcAddress(hmod, PCSTR(concat!($name, "\0").as_ptr()))
+                    .ok_or(concat!($name, " not found"))?)
+        };
+    }
+
+    let fns = GlFns {
+        push_attrib:   load!("glPushAttrib", F1),
+        pop_attrib:    load!("glPopAttrib", V),
+        push_matrix:   load!("glPushMatrix", V),
+        pop_matrix:    load!("glPopMatrix", V),
+        matrix_mode:   load!("glMatrixMode", F1),
+        load_identity: load!("glLoadIdentity", V),
+        ortho:         load!("glOrtho", F6d),
+        disable:       load!("glDisable", F1),
+        enable:        load!("glEnable", F1),
+        blend_func:    load!("glBlendFunc", F2),
+        color4f:       load!("glColor4f", F4f),
+        begin:         load!("glBegin", F1),
+        end:           load!("glEnd", V),
+        vertex2f:      load!("glVertex2f", F2f),
+        line_width:    load!("glLineWidth", F1),
+        raster_pos2f:  load!("glRasterPos2f", F2f),
+        list_base:     load!("glListBase", F1),
+        call_lists:    load!("glCallLists", CallLists),
     };
 
-    GL.set(g).map_err(|_| "GL 已加载".to_string())?;
-    logger::debug("GL 1.1 函数指针加载完成");
+    GL_FNS.set(fns).map_err(|_| "GL_FNS already set")?;
+    logger::info("HUD GL 函数指针加载完成");
     Ok(())
 }
 
+fn gl() -> &'static GlFns {
+    GL_FNS.get().expect("GL_FNS not loaded")
+}
+
 pub unsafe fn init_font(hdc: HDC) -> Result<(), String> {
-    let font = CreateFontW(
-        14,                          // cHeight
-        0,                           // cWidth
-        0,                           // cEscapement
-        0,                           // cOrientation
-        FW_NORMAL.0 as i32,          // cWeight
-        0,                           // bItalic
-        0,                           // bUnderline
-        0,                           // bStrikeOut
-        DEFAULT_CHARSET.0 as u32,    // iCharSet
-        OUT_DEFAULT_PRECIS.0 as u32, // iOutPrecision
-        CLIP_DEFAULT_PRECIS.0 as u32,// iClipPrecision
-        ANTIALIASED_QUALITY.0 as u32,// iQuality
-        DEFAULT_PITCH.0 as u32,      // iPitchAndFamily  ← ★ 缺的是这个
-        windows::core::PCWSTR(b"Consolas\0".as_ptr() as *const u16), // pszFaceName
+    let font = windows::Win32::Graphics::Gdi::CreateFontW(
+        14, 0, 0, 0,
+        400, 0, 0, 0,
+        1, 0, 0, 0,
+        0,
+        windows::core::PCWSTR(b"Consolas\0".as_ptr() as *const u16),
     );
     if font.is_invalid() {
-        return Err("CreateFontW 失败".into());
+        return Err("CreateFontW failed".into());
     }
 
-    let old = SelectObject(hdc, HGDIOBJ(font.0));
-    let g = GL.get().ok_or("GL 未加载")?;
-    let base = (g.glGenLists)(96);
+    let old = windows::Win32::Graphics::Gdi::SelectObject(hdc, font);
+    let base = gl_gen_lists(96);
     if base == 0 {
-        SelectObject(hdc, old);
-        return Err("glGenLists 返回 0".into());
+        windows::Win32::Graphics::Gdi::SelectObject(hdc, old);
+        return Err("glGenLists returned 0".into());
     }
     let ok = wglUseFontBitmapsA(hdc, 32, 96, base).is_ok();
-    SelectObject(hdc, old);
+    windows::Win32::Graphics::Gdi::SelectObject(hdc, old);
 
     if !ok {
-        return Err("wglUseFontBitmapsA 失败".into());
+        return Err("wglUseFontBitmapsA failed".into());
     }
     let _ = FONT_BASE.set(base);
     logger::debug("HUD 字体初始化完成");
     Ok(())
 }
 
-unsafe fn text(g: &Gl, x: f32, y: f32, s: &str) {
-    let base = match FONT_BASE.get() {
-        Some(b) => *b,
-        None => return,
-    };
-    let bytes: Vec<u8> = s.bytes().filter(|b| *b >= 32 && *b < 128).collect();
-    if bytes.is_empty() {
-        return;
-    }
-    (g.glRasterPos2f)(x, y);
-    (g.glListBase)(base - 32);
-    (g.glCallLists)(bytes.len() as i32, GL_UNSIGNED_BYTE, bytes.as_ptr() as *const c_void);
+unsafe fn gl_gen_lists(count: u32) -> u32 {
+    let opengl32_name: Vec<u16> = "opengl32.dll\0".encode_utf16().collect();
+    let hmod = GetModuleHandleW(PCWSTR(opengl32_name.as_ptr())).unwrap();
+    type Fn = unsafe extern "system" fn(i32) -> u32;
+    let ptr = GetProcAddress(hmod, PCSTR(b"glGenLists\0".as_ptr())).unwrap();
+    let f: Fn = std::mem::transmute(ptr);
+    f(count as i32)
 }
 
-unsafe fn rect_border(g: &Gl, x: f32, y: f32, w: f32, h: f32) {
-    (g.glBegin)(GL_LINE_STRIP);
-    (g.glVertex2f)(x, y);
-    (g.glVertex2f)(x + w, y);
-    (g.glVertex2f)(x + w, y + h);
-    (g.glVertex2f)(x, y + h);
-    (g.glVertex2f)(x, y);
-    (g.glEnd)();
-}
-
-unsafe fn rect_fill(g: &Gl, x: f32, y: f32, w: f32, h: f32) {
-    (g.glBegin)(GL_QUADS);
-    (g.glVertex2f)(x, y);
-    (g.glVertex2f)(x + w, y);
-    (g.glVertex2f)(x + w, y + h);
-    (g.glVertex2f)(x, y + h);
-    (g.glEnd)();
-}
-
-/// 主绘制。调用前必须已 gl_ctx::begin()，调用后必须 gl_ctx::end()。
 pub unsafe fn draw(
     w: i32,
     h: i32,
@@ -221,95 +150,183 @@ pub unsafe fn draw(
     fps: f32,
     frame: u64,
     state: &str,
-    vm_ok: bool,
-    ctx_ok: bool,
+    _vm_ok: bool,
+    _ctx_ok: bool,
 ) {
-    let g = match GL.get() {
-        Some(g) => g,
-        None => return,
-    };
-
-    let wf = w as f32;
-    let hf = h as f32;
-
-    // ── 正交投影：原点左上，1 单位 = 1 像素 ──
-    (g.glViewport)(0, 0, w, h);
-    (g.glMatrixMode)(GL_PROJECTION);
-    (g.glPushMatrix)();
-    (g.glLoadIdentity)();
-    (g.glOrtho)(0.0, wf as f64, hf as f64, 0.0, -1.0, 1.0);
-    (g.glMatrixMode)(GL_MODELVIEW);
-    (g.glPushMatrix)();
-    (g.glLoadIdentity)();
-
-    (g.glDisable)(GL_DEPTH_TEST);
-    (g.glDisable)(GL_TEXTURE_2D);
-    (g.glDisable)(GL_LIGHTING);
-    (g.glDisable)(GL_CULL_FACE);
-    (g.glEnable)(GL_BLEND);
-    (g.glBlendFunc)(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    // ── 红色边框：证明链路通了 ──
-    (g.glColor4f)(1.0, 0.15, 0.15, 0.85);
-    (g.glLineWidth)(3.0);
-    rect_border(g, 8.0, 8.0, wf - 16.0, hf - 16.0);
-
-    // ── HUD 面板 ──
-    let px = 20.0_f32;
-    let py = 20.0_f32;
-    let pw = 300.0_f32;
-    let ph = 132.0_f32;
-
-    (g.glColor4f)(0.0, 0.0, 0.0, 0.55);
-    rect_fill(g, px, py, pw, ph);
-    (g.glColor4f)(0.35, 0.75, 1.0, 0.9);
-    (g.glLineWidth)(1.0);
-    rect_border(g, px, py, pw, ph);
-
-    let mut ly = py + 20.0;
-    let step = 16.0_f32;
-
-    macro_rules! line {
-        ($color:expr, $fmt:literal $(, $arg:expr)*) => {
-            let s = format!($fmt $(, $arg)*);
-            (g.glColor4f)($color.0, $color.1, $color.2, $color.3);
-            text(g, px + 12.0, ly, &s);
-            ly += step;
-        };
+    if !hud_visible() {
+        return;
     }
 
-    // 前 3 行是自检：任何一行红了，立刻知道是哪一层断的
-    let ok_c = (0.55_f32, 0.95_f32, 0.55_f32, 1.0_f32);
-    let bad_c = (1.0_f32, 0.4_f32, 0.4_f32, 1.0_f32);
-    let dim_c = (0.75_f32, 0.78_f32, 0.82_f32, 1.0_f32);
+    let g = gl();
 
-    let hz_c = if fps > 5.0 { ok_c } else { bad_c };
-    let vm_c = if vm_ok { ok_c } else { bad_c };
-    let ctx_c = if ctx_ok { ok_c } else { bad_c };
+    (g.push_attrib)(0x000FFFFF);
+    (g.push_matrix)();
 
-    line!(dim_c, "WeaveRift  f{}", frame);
-    line!(hz_c, "hook  {:.0} Hz", fps);
-    line!(vm_c, "jni   {}", if vm_ok { "ok" } else { "NO VM" });
-    line!(ctx_c, "ctx   {}", if ctx_ok { "ok" } else { "NO CTX" });
-    line!(dim_c, "state {}", state);
+    (g.matrix_mode)(0x1701);
+    (g.load_identity)();
+    (g.ortho)(0.0, w as f64, h as f64, 0.0, -1.0, 1.0);
+
+    (g.matrix_mode)(0x1700);
+    (g.load_identity)();
+
+    (g.disable)(0x0B71);
+    (g.disable)(0x0DE1);
+    (g.enable)(0x0BE2);
+    (g.blend_func)(0x0302, 0x0303);
+
+    draw_intro(w, h);
+
+    let ok_c = (0.55, 0.95, 0.55, 1.0);
+    let bad_c = (1.0, 0.4, 0.4, 1.0);
+    let dim_c = (0.75, 0.78, 0.82, 1.0);
+
+    draw_line(10.0, 40.0, dim_c, &format!("WeaveRift  f{}", frame));
+    draw_line(10.0, 58.0, if fps > 5.0 { ok_c } else { bad_c },
+              &format!("hook  {:.0} Hz", fps));
+    draw_line(10.0, 76.0, dim_c, &format!("state {}", state));
 
     match snap {
         Some(s) if s.valid => {
-            line!(dim_c, "xyz   {:.1} {:.1} {:.1}", s.x, s.y, s.z);
-            line!(dim_c, "rot   {:.1} / {:.1}", s.yaw, s.pitch);
-            line!(dim_c, "hp    {:.0}/{:.0}   ents {}", s.health, s.max_health, s.entities);
+            draw_line(10.0, 100.0, dim_c,
+                      &format!("xyz   {:.1} {:.1} {:.1}", s.x, s.y, s.z));
+            draw_line(10.0, 118.0, dim_c,
+                      &format!("rot   {:.1} / {:.1}", s.yaw, s.pitch));
+            draw_line(10.0, 136.0, dim_c,
+                      &format!("hp    {:.0}/{:.0}   ents {}",
+                               s.health, s.max_health, s.entity_list.len()));
         }
         _ => {
-            line!(bad_c, "no snapshot (agent 未就绪?)");
+            draw_line(10.0, 100.0, bad_c, "no snapshot");
         }
     }
 
-    // ── 还原 ──
-    (g.glColor4f)(1.0, 1.0, 1.0, 1.0);
-    (g.glFlush)();
+    (g.pop_matrix)();
+    (g.pop_attrib)();
+}
 
-    (g.glMatrixMode)(GL_MODELVIEW);
-    (g.glPopMatrix)();
-    (g.glMatrixMode)(GL_PROJECTION);
-    (g.glPopMatrix)();
+unsafe fn draw_intro(w: i32, h: i32) {
+    let t = match INJECT_TIME.get() {
+        Some(t) => t,
+        None => return,
+    };
+    let elapsed_ms = t.elapsed().as_millis() as f32;
+    if elapsed_ms > 4500.0 {
+        return;
+    }
+
+    let alpha = if elapsed_ms < 2500.0 {
+        1.0
+    } else {
+        1.0 - (elapsed_ms - 2500.0) / 2000.0
+    };
+
+    let g = gl();
+
+    (g.color4f)(0.0, 0.0, 0.0, alpha * 0.85);
+    (g.begin)(0x0007);
+    (g.vertex2f)(0.0, 0.0);
+    (g.vertex2f)(w as f32, 0.0);
+    (g.vertex2f)(w as f32, h as f32);
+    (g.vertex2f)(0.0, h as f32);
+    (g.end)();
+
+    (g.matrix_mode)(0x1701);
+    (g.push_matrix)();
+    (g.load_identity)();
+    (g.ortho)(0.0, (w as f32 / 3.0) as f64, (h as f32 / 3.0) as f64, 0.0, -1.0, 1.0);
+
+    (g.matrix_mode)(0x1700);
+    (g.push_matrix)();
+    (g.load_identity)();
+
+    let cx = (w as f32 / 2.0) / 3.0;
+    let cy = (h as f32 / 2.0) / 3.0;
+
+    (g.color4f)(0.2, 0.7, 1.0, alpha);
+    draw_text_centered(cx, cy - 6.0, "WeaveRift");
+
+    (g.color4f)(0.5, 0.5, 0.5, alpha * 0.8);
+    draw_text_centered(cx, cy + 14.0, "Weave through the rift.");
+
+    (g.matrix_mode)(0x1700);
+    (g.pop_matrix)();
+
+    (g.matrix_mode)(0x1701);
+    (g.pop_matrix)();
+
+    (g.matrix_mode)(0x1700);
+}
+
+unsafe fn draw_text_centered(x: f32, y: f32, text: &str) {
+    let base = match FONT_BASE.get() {
+        Some(b) => *b,
+        None => return,
+    };
+    let g = gl();
+    let approx_w = text.len() as f32 * 7.5;
+    (g.raster_pos2f)(x - approx_w / 2.0, y);
+    let bytes: Vec<u8> = text.bytes().collect();
+    (g.list_base)(base - 32);
+    (g.call_lists)(bytes.len() as i32, 0x1401, bytes.as_ptr() as *const c_void);
+}
+
+unsafe fn draw_line(x: f32, y: f32, color: (f32, f32, f32, f32), text: &str) {
+    let base = match FONT_BASE.get() {
+        Some(b) => *b,
+        None => return,
+    };
+
+    let g = gl();
+
+    (g.color4f)(color.0, color.1, color.2, color.3);
+    (g.raster_pos2f)(x, y);
+
+    let bytes: Vec<u8> = text.bytes().collect();
+    (g.list_base)(base - 32);
+    (g.call_lists)(bytes.len() as i32, 0x1401, bytes.as_ptr() as *const c_void);
+}
+
+pub unsafe fn draw_raw_line(x1: f32, y1: f32, x2: f32, y2: f32,
+                             r: f32, g: f32, b: f32, a: f32) {
+    let gl = match GL_FNS.get() { Some(g) => g, None => return };
+    (gl.color4f)(r, g, b, a);
+    (gl.begin)(0x0001);
+    (gl.vertex2f)(x1, y1);
+    (gl.vertex2f)(x2, y2);
+    (gl.end)();
+}
+
+pub unsafe fn draw_raw_rect(x: f32, y: f32, w: f32, h: f32,
+                             r: f32, g: f32, b: f32, a: f32) {
+    let gl = match GL_FNS.get() { Some(g) => g, None => return };
+    (gl.color4f)(r, g, b, a);
+    (gl.begin)(0x0007);
+    (gl.vertex2f)(x, y);
+    (gl.vertex2f)(x + w, y);
+    (gl.vertex2f)(x + w, y + h);
+    (gl.vertex2f)(x, y + h);
+    (gl.end)();
+}
+
+pub unsafe fn draw_raw_text(x: f32, y: f32, text: &str,
+                             r: f32, g: f32, b: f32, a: f32) {
+    let base = match FONT_BASE.get() { Some(b) => *b, None => return };
+    let gl = match GL_FNS.get() { Some(g) => g, None => return };
+    (gl.color4f)(r, g, b, a);
+    (gl.raster_pos2f)(x, y);
+    let bytes: Vec<u8> = text.bytes().collect();
+    (gl.list_base)(base - 32);
+    (gl.call_lists)(bytes.len() as i32, 0x1401, bytes.as_ptr() as *const c_void);
+}
+
+pub unsafe fn draw_raw_triangle(x1: f32, y1: f32, x2: f32, y2: f32,
+                                 x3: f32, y3: f32,
+                                 r: f32, g: f32, b: f32, a: f32) {
+    let gl = match GL_FNS.get() { Some(g) => g, None => return };
+    (gl.color4f)(r, g, b, a);
+    (gl.begin)(0x0006);
+    (gl.vertex2f)(x1, y1);
+    (gl.vertex2f)(x2, y2);
+    (gl.vertex2f)(x3, y3);
+    (gl.end)();
 }

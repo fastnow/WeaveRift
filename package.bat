@@ -14,13 +14,13 @@ set "WR_SUB=%RELEASE_DIR%\WeaveRift"
 
 :: ©¤©¤©¤ Check toolchain ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
 where cargo >nul 2>nul
-if %errorlevel% neq 0 (
+if errorlevel 1 (
     echo [ERROR] cargo not found. Please install Rust and add it to PATH.
     pause
     exit /b 1
 )
 where javac >nul 2>nul
-if %errorlevel% neq 0 (
+if errorlevel 1 (
     echo [ERROR] javac not found. Please install JDK 17+ and add it to PATH.
     pause
     exit /b 1
@@ -28,18 +28,26 @@ if %errorlevel% neq 0 (
 
 echo Toolchain Info:
 cargo --version
-javac -version
+javac -version 2>&1
 echo.
 
 :: ©¤©¤©¤ Clean old release ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
-echo [1/6] Cleaning old release directory...
-if exist "%RELEASE_DIR%" rmdir /S /Q "%RELEASE_DIR%"
+echo [1/7] Cleaning old release directory...
+if exist "%RELEASE_DIR%" (
+    rmdir /S /Q "%RELEASE_DIR%"
+    if exist "%RELEASE_DIR%" (
+        echo [ERROR] Cannot delete old release dir.
+        echo         Close any program using it ^(Explorer, WeaveRift.exe, etc.^) and retry.
+        pause
+        exit /b 1
+    )
+)
 mkdir "%WR_SUB%"
 echo [OK] Cleaned
 echo.
 
 :: ©¤©¤©¤ Build WeaveRift.exe (main injector) ©¤©¤©¤©¤©¤©¤©¤©¤©¤
-echo [2/6] Building WeaveRift.exe...
+echo [2/7] Building WeaveRift.exe...
 cd /d "%ROOT_DIR%"
 cargo build --release
 if errorlevel 1 (
@@ -58,8 +66,28 @@ copy /Y "%EXE_SRC%" "%RELEASE_DIR%\WeaveRift.exe" >nul
 echo [OK] WeaveRift.exe deployed
 echo.
 
+:: ©¤©¤©¤ client.dll ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+echo [3/7] Building client.dll...
+cd /d "%ROOT_DIR%\client"
+cargo build --release
+if errorlevel 1 (
+    echo [ERROR] client build failed
+    pause
+    exit /b 1
+)
+
+set "CLIENT_SRC=%ROOT_DIR%\client\target\release\client.dll"
+if not exist "%CLIENT_SRC%" (
+    echo [ERROR] Cannot find %CLIENT_SRC%
+    pause
+    exit /b 1
+)
+copy /Y "%CLIENT_SRC%" "%WR_SUB%\client.dll" >nul
+echo [OK] client.dll deployed
+echo.
+
 :: ©¤©¤©¤ Build Agent ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
-echo [3/6] Building weaverift-agent.jar...
+echo [4/7] Building weaverift-agent.jar...
 cd /d "%ROOT_DIR%\agent"
 call build.bat
 if errorlevel 1 (
@@ -79,7 +107,7 @@ echo [OK] Agent deployed
 echo.
 
 :: ©¤©¤©¤ Build jar_loader ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
-echo [4/6] Building jar_loader.dll...
+echo [5/7] Building jar_loader.dll...
 cd /d "%ROOT_DIR%\jar_loader"
 cargo build --release
 if errorlevel 1 (
@@ -99,20 +127,20 @@ echo [OK] DLL deployed
 echo.
 
 :: ©¤©¤©¤ Copy console.html ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
-echo [5/6] Copying console.html...
+echo [6/7] Copying console.html...
 if exist "%ROOT_DIR%\console.html" (
     copy /Y "%ROOT_DIR%\console.html" "%WR_SUB%\console.html" >nul
     echo [OK] console.html deployed
 ) else if exist "%ROOT_DIR%\jar_loader\console.html" (
     copy /Y "%ROOT_DIR%\jar_loader\console.html" "%WR_SUB%\console.html" >nul
-    echo [OK] console.html deployed (from jar_loader/)
+    echo [OK] console.html deployed ^(from jar_loader/^)
 ) else (
     echo [WARN] console.html not found. Debug console will use built-in version.
 )
 echo.
 
 :: ©¤©¤©¤ Check runtime dependencies ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
-echo [6/6] Checking runtime dependencies...
+echo [7/7] Checking runtime dependencies...
 if exist "%ROOT_DIR%\obf2srg.srg" (
     copy /Y "%ROOT_DIR%\obf2srg.srg" "%WR_SUB%\obf2srg.srg" >nul
     echo [OK] obf2srg.srg deployed
@@ -124,6 +152,7 @@ if exist "%ROOT_DIR%\obf2srg.srg" (
     echo    https://github.com/kettingpowered/MinecraftMappings
     echo    and place it at:
     echo    %WR_SUB%\obf2srg.srg
+    echo    After placing it, re-run this script or copy it manually.
 )
 echo.
 
@@ -139,23 +168,5 @@ dir /B "%RELEASE_DIR%"
 echo.
 echo [release/WeaveRift/]
 dir /B "%WR_SUB%"
-echo.
-
-:: ©¤©¤©¤ Usage Tips ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
-echo ========================================
-echo  Usage Tips
-echo ========================================
-echo.
-echo 1. Add the following JVM argument in PCL/HMCL:
-echo      -Djdk.attach.allowAttachSelf=true
-echo.
-echo 2. Launch the game, then use release\WeaveRift.exe
-echo    to inject jar_loader.dll
-echo.
-echo 3. Inject weaverift-agent.jar via Attach API,
-echo    with argument: srg=%WR_SUB%\obf2srg.srg
-echo.
-echo 4. Debug console URL is written to:
-echo      %%TEMP%%\WeaveRift\debug-url.txt
 echo.
 pause

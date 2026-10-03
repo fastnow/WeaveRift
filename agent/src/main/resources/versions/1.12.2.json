@@ -1,0 +1,90 @@
+{
+  "schema_version": 2,
+  "mc_version": "1.12.2",
+  "namespace": "srg",
+  "classes": {
+    "Minecraft": {
+      "srg": "net/minecraft/client/Minecraft",
+      "obf": "bib"
+    },
+    "Entity": {
+      "srg": "net/minecraft/entity/Entity",
+      "obf": "vg"
+    },
+    "EntityLivingBase": {
+      "srg": "net/minecraft/entity/EntityLivingBase"
+    },
+    "EntityPlayer": {
+      "srg": "net/minecraft/entity/player/EntityPlayer"
+    },
+    "EntityPlayerSP": {
+      "srg": "net/minecraft/client/entity/EntityPlayerSP"
+    },
+    "World": {
+      "srg": "net/minecraft/world/World"
+    }
+  },
+  "fields": {
+    "Minecraft.field_71439_g": {
+      "owner": "Minecraft",
+      "srg": "field_71439_g",
+      "type": "EntityPlayerSP"
+    },
+    "Minecraft.field_71441_e": {
+      "owner": "Minecraft",
+      "srg": "field_71441_e",
+      "type": "World"
+    },
+    "Entity.field_70125_A": {
+      "owner": "Entity",
+      "srg": "field_70125_A",
+      "type": "float"
+    },
+    "Entity.field_70161_v": {
+      "owner": "Entity",
+      "srg": "field_70161_v",
+      "type": "double"
+    },
+    "Entity.field_70163_u": {
+      "owner": "Entity",
+      "srg": "field_70163_u",
+      "type": "double"
+    },
+    "Entity.field_70165_t": {
+      "owner": "Entity",
+      "srg": "field_70165_t",
+      "type": "double"
+    },
+    "Entity.field_70177_z": {
+      "owner": "Entity",
+      "srg": "field_70177_z",
+      "type": "float"
+    },
+    "World.field_72996_f": {
+      "owner": "World",
+      "srg": "field_72996_f",
+      "type": "java.util.List"
+    }
+  },
+  "methods": {
+    "Minecraft.func_71410_x": {
+      "owner": "Minecraft",
+      "srg": "func_71410_x",
+      "sig": "()Lnet/minecraft/client/Minecraft;"
+    },
+    "EntityLivingBase.func_110138_aP": {
+      "owner": "EntityLivingBase",
+      "srg": "func_110138_aP",
+      "sig": "()F"
+    },
+    "EntityLivingBase.func_110143_aJ": {
+      "owner": "EntityLivingBase",
+      "srg": "func_110143_aJ",
+      "sig": "()F"
+    }
+  },
+  "probe": {
+    "class": "Minecraft",
+    "discriminator_field": "Minecraft.field_71439_g"
+  }
+}

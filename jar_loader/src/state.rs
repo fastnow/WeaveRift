@@ -3,7 +3,6 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 pub const BOOT: u8 = 0;
-pub const START_HTTP: u8 = 1;
 pub const WAIT_GL: u8 = 2;
 pub const FIND_VM: u8 = 3;
 pub const CREATE_CTX: u8 = 4;
@@ -64,7 +63,6 @@ pub fn recover() {
 pub fn name(s: u8) -> &'static str {
     match s {
         BOOT => "Boot",
-        START_HTTP => "StartHttp",
         WAIT_GL => "WaitGL",
         FIND_VM => "FindVM",
         CREATE_CTX => "CreateCtx",

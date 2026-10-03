@@ -1,12 +1,14 @@
 [package]
 name = "jar_loader"
-version = "2.0.0"
+version = "2.3.0"
 edition = "2021"
+build = "build.rs"
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
+module_hide = { path = "../module_hide" }
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_LibraryLoader",
@@ -15,11 +17,17 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Gdi",
     "Win32_Graphics_OpenGL",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 minhook = "0.9.0"
 jni = "0.21"
-tiny_http = "0.12"
+
+[build-dependencies]
+cc = "1.0"
 
 [profile.release]
 opt-level = "z"

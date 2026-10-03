@@ -26,17 +26,40 @@ echo.
 
 :: ─── 检查源码文件 ──────────────────────────────
 set "MISSING=0"
+
 if not exist "%SCRIPT_DIR%\src\lib.rs" (
     echo [错误] 找不到 src\lib.rs
     set "MISSING=1"
 )
+
 if not exist "%SCRIPT_DIR%\src\module_hide.rs" (
     echo [警告] 找不到 src\module_hide.rs，PEB 断链将不可用
 )
 
+if not exist "%SCRIPT_DIR%\src\hook_entry.c" (
+    echo [错误] 找不到 src\hook_entry.c，SEH 兜底将不可用
+    set "MISSING=1"
+)
+
+if not exist "%SCRIPT_DIR%\build.rs" (
+    echo [错误] 找不到 build.rs，cc 编译链会失败
+    set "MISSING=1"
+)
+
 if "%MISSING%"=="1" (
+    echo.
+    echo 构建中止：缺少必要文件。
     pause
     exit /b 1
+)
+
+:: ─── 检查 C 编译器（cc crate 依赖 MSVC）────────
+where cl >nul 2>nul
+if %errorlevel% neq 0 (
+    echo [警告] 未找到 cl.exe（MSVC 编译器）。
+    echo        如果 cc crate 报错，请安装 Visual Studio Build Tools。
+    echo        下载：https://visualstudio.microsoft.com/visual-cpp-build-tools/
+    echo.
 )
 
 :: ─── 构建 ─────────────────────────────────────
@@ -91,14 +114,6 @@ if %errorlevel% equ 0 (
     exit /b 1
 )
 
-:: ─── 复制 console.html ─────────────────────────
-set "HTML_SRC=%SCRIPT_DIR%\console.html"
-set "HTML_DST=%TARGET_DIR%\console.html"
-if exist "%HTML_SRC%" (
-    copy /Y "%HTML_SRC%" "%HTML_DST%" >nul
-    echo ✅ console.html 已部署
-)
-
 :: ─── 复制 Agent JAR ───────────────────────────
 set "AGENT_SRC=%PROJECT_ROOT%\agent\build\weaverift-agent.jar"
 if exist "%AGENT_SRC%" (
@@ -117,3 +132,4 @@ echo.
 echo 部署目录：%TARGET_DIR%
 dir /B "%TARGET_DIR%"
 echo.
+pause
